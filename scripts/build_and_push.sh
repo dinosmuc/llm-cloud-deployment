@@ -26,7 +26,7 @@ echo ""
 
 # Build TGI image (this downloads the model — takes 10-15 min first time)
 echo "→ Building TGI image (this may take a while)..."
-docker build -t ${ECR_URL}/${REPO_NAME}:tgi containers/tgi/
+docker build -t ${ECR_URL}/${REPO_NAME}:tgi containers/vllm/
 echo ""
 
 # Build nginx image
