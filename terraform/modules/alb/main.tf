@@ -55,11 +55,36 @@ resource "aws_lb_listener" "http" {
 # WAF WEB ACL
 resource "aws_wafv2_web_acl" "main" {
   name        = "${var.project_name}-waf"
-  description = "Rate limiting for ALB"
+  description = "Baseline WAF for ALB: AWS Managed Common Rule Set + 1000 req/IP/5min rate limit."
   scope       = "REGIONAL"
 
   default_action {
     allow {}
+  }
+
+  # AWSManagedRulesCommonRuleSet covers OWASP Top 10 categories (XSS, SQLi,
+  # common injection patterns). Priority 0 ensures malicious requests are
+  # blocked before they count against the rate-limit budget below.
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 0
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesCommonRuleSet"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSManagedRulesCommonRuleSet"
+      sampled_requests_enabled   = true
+    }
   }
 
   rule {

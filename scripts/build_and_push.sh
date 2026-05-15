@@ -1,9 +1,11 @@
 #!/bin/bash
 set -e
 
-# Configuration
-REGION="eu-central-1"
-REPO_NAME="gemma-inference"
+# Configuration. Both values honor environment variables so the script can
+# be re-pointed at a different region or repo name without editing in place:
+#   AWS_REGION=us-east-1 ECR_REPO_NAME=gemma-staging ./scripts/build_and_push.sh
+REGION="${AWS_REGION:-eu-central-1}"
+REPO_NAME="${ECR_REPO_NAME:-gemma-inference}"
 
 # Get AWS account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
