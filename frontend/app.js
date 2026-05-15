@@ -1,5 +1,10 @@
 const API_URL = "${alb_url}";
 
+// System prompt defining the chatbot persona. In Task 3 this becomes a Terraform
+// variable injected at deploy time; for now it lives inline so the file stays
+// self-contained for local browser testing.
+const SYSTEM_PROMPT = "You are a helpful AI assistant powered by Google's Gemma 4 model and deployed on AWS. Be friendly, clear, and concise. If you don't know something, say so honestly.";
+
 let apiKey = "";
 let isGenerating = false;
 
@@ -72,19 +77,23 @@ async function sendMessage() {
     const assistantDiv = addMessage("assistant", "");
 
     try {
-        const response = await fetch(API_URL + "/generate_stream", {
+        // OpenAI-compatible chat completions endpoint (served by vLLM via nginx).
+        // No conversation history yet — every send is a fresh [system, user] pair.
+        const response = await fetch(API_URL + "/v1/chat/completions", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
                 "x-api-key": apiKey
             },
             body: JSON.stringify({
-                inputs: text,
-                parameters: {
-                    max_new_tokens: 512,
-                    temperature: 0.7,
-                    top_p: 0.9
-                }
+                model: "google/gemma-4-E2B-it",
+                messages: [
+                    { role: "system", content: SYSTEM_PROMPT },
+                    { role: "user",   content: text }
+                ],
+                temperature: 0.7,
+                max_tokens: 512,
+                stream: true
             })
         });
 
@@ -97,7 +106,8 @@ async function sendMessage() {
         }
 
         if (response.status === 503) {
-            assistantDiv.textContent = "Service is starting up (~3-5 min). Retrying...";
+            // Cold start: no healthy task behind the ALB. Poll /health until ready.
+            assistantDiv.textContent = "Warming up the GPU and loading the model. First request after idle can take 5–8 minutes. Please wait...";
             await retryUntilReady(text, assistantDiv);
             return;
         }
@@ -109,7 +119,13 @@ async function sendMessage() {
             return;
         }
 
-        // Read SSE stream
+        // Read SSE stream — OpenAI Chat Completions format:
+        //   data: {"choices":[{"delta":{"role":"assistant"}}], ...}     <- initial chunk, ignored
+        //   data: {"choices":[{"delta":{"content":"Hello"}}], ...}      <- token chunks
+        //   ...
+        //   data: {"choices":[{"delta":{}, "finish_reason":"stop"}], ...} <- end-of-message chunk
+        //   data: {"choices":[], "usage":{...}}                          <- optional usage stats
+        //   data: [DONE]
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let fullText = "";
@@ -122,20 +138,31 @@ async function sendMessage() {
             const lines = chunk.split("\n");
 
             for (const line of lines) {
-                if (line.startsWith("data:")) {
-                    const data = line.slice(5).trim();
-                    if (data === "[DONE]") continue;
+                if (!line.startsWith("data:")) continue;
+                const data = line.slice(5).trim();
+                if (data === "[DONE]") continue;
 
-                    try {
-                        const parsed = JSON.parse(data);
-                        if (parsed.token && parsed.token.text) {
-                            fullText += parsed.token.text;
-                            assistantDiv.textContent = fullText;
-                            messages.scrollTop = messages.scrollHeight;
-                        }
-                    } catch (e) {
-                        // Skip malformed JSON lines
+                try {
+                    const parsed = JSON.parse(data);
+
+                    // Final usage chunk: empty choices, optional usage stats.
+                    // Log for observability and skip rendering.
+                    if (parsed.usage && (!parsed.choices || parsed.choices.length === 0)) {
+                        console.log("vLLM usage:", parsed.usage);
+                        continue;
                     }
+
+                    // Token text lives at choices[0].delta.content. The initial
+                    // role chunk and the finish_reason chunk have no content; the
+                    // empty-string check makes them no-ops automatically.
+                    const piece = parsed.choices?.[0]?.delta?.content;
+                    if (typeof piece === "string" && piece.length > 0) {
+                        fullText += piece;
+                        assistantDiv.textContent = fullText;
+                        messages.scrollTop = messages.scrollHeight;
+                    }
+                } catch (e) {
+                    // Skip malformed JSON lines
                 }
             }
         }
@@ -158,11 +185,25 @@ async function sendMessage() {
 
 async function retryUntilReady(text, messageDiv) {
     let attempts = 0;
-    const maxAttempts = 20;
+    const maxAttempts = 40;   // 40 × 15 s = 10 min ceiling (cold start is realistically 6–8 min)
+
+    // Switch the status pill from "Generating..." to "Warming up..." so the
+    // user doesn't think the model is actively producing tokens during this wait.
+    status.textContent = "Warming up...";
+    status.className = "status connecting";
 
     while (attempts < maxAttempts) {
         attempts++;
-        messageDiv.textContent = "Service is starting up... Retry " + attempts + "/" + maxAttempts + " (waiting 15s)";
+
+        if (attempts === 1) {
+            messageDiv.textContent = "Warming up the GPU and loading the model. First request after idle can take 5–8 minutes. Please wait...";
+        } else {
+            const elapsedMin = Math.round(attempts * 0.25);
+            messageDiv.textContent =
+                "Still warming up (attempt " + attempts + "/" + maxAttempts +
+                ", ~" + elapsedMin + " min elapsed). " +
+                "Your message will send automatically once the service is ready.";
+        }
         messages.scrollTop = messages.scrollHeight;
 
         await new Promise(resolve => setTimeout(resolve, 15000));
@@ -171,7 +212,7 @@ async function retryUntilReady(text, messageDiv) {
             const response = await fetch(API_URL + "/health");
             if (response.ok) {
                 messageDiv.remove();
-                // Service is ready, resend the original message
+                // Service is ready — re-stage the original prompt and re-send it
                 userInput.value = text;
                 isGenerating = false;
                 sendBtn.disabled = false;
