@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")/../terraform"
 
 echo "========================================="
-echo "  Phi-3 Cloud Deployment — Destroy"
+echo "  Gemma 4 Cloud Deployment — Destroy"
 echo "========================================="
 echo ""
 echo "  WARNING: This will destroy ALL infrastructure"

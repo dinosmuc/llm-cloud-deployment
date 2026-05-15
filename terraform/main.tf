@@ -46,23 +46,27 @@ module "alb" {
 }
 
 module "ecs" {
-  source               = "./modules/ecs"
-  project_name         = var.project_name
-  aws_region           = var.aws_region
-  private_subnet_ids   = module.networking.private_subnet_ids
-  ecs_security_group_id = module.networking.ecs_security_group_id
-  target_group_arn     = module.alb.target_group_arn
-  ecr_repository_url   = module.ecr.repository_url
-  instance_type        = var.instance_type
-  min_capacity         = var.min_capacity
-  max_capacity         = var.max_capacity
-  api_key              = var.api_key
+  source                  = "./modules/ecs"
+  project_name            = var.project_name
+  aws_region              = var.aws_region
+  private_subnet_ids      = module.networking.private_subnet_ids
+  ecs_security_group_id   = module.networking.ecs_security_group_id
+  target_group_arn        = module.alb.target_group_arn
+  ecr_repository_url      = module.ecr.repository_url
+  alb_arn_suffix          = module.alb.alb_arn_suffix
+  target_group_arn_suffix = module.alb.target_group_arn_suffix
+  instance_type           = var.instance_type
+  min_capacity            = var.min_capacity
+  max_capacity            = var.max_capacity
+  public_api_key          = var.public_api_key
+  internal_api_key        = var.internal_api_key
 }
 
 module "frontend" {
-  source       = "./modules/frontend"
-  project_name = var.project_name
-  alb_dns_name = module.alb.alb_dns_name
+  source        = "./modules/frontend"
+  project_name  = var.project_name
+  alb_dns_name  = module.alb.alb_dns_name
+  system_prompt = var.system_prompt
 }
 
 module "monitoring" {

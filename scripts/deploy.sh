@@ -2,7 +2,7 @@
 set -e
 
 echo "========================================="
-echo "  Phi-3 Cloud Deployment — Deploy"
+echo "  Gemma 4 Cloud Deployment — Deploy"
 echo "========================================="
 echo ""
 

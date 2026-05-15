@@ -8,8 +8,8 @@ output "api_url" {
   value       = module.alb.alb_dns_name
 }
 
-output "api_key" {
-  description = "API key for authenticating requests"
-  value       = var.api_key
+output "public_api_key" {
+  description = "User-facing API key for authenticating requests"
+  value       = var.public_api_key
   sensitive   = true
 }

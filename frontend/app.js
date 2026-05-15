@@ -1,9 +1,9 @@
 const API_URL = "${alb_url}";
 
-// System prompt defining the chatbot persona. In Task 3 this becomes a Terraform
-// variable injected at deploy time; for now it lives inline so the file stays
-// self-contained for local browser testing.
-const SYSTEM_PROMPT = "You are a helpful AI assistant powered by Google's Gemma 4 model and deployed on AWS. Be friendly, clear, and concise. If you don't know something, say so honestly.";
+// System prompt is injected by Terraform via templatefile() — see modules/frontend/main.tf.
+// The string is declared in terraform/variables.tf and can be overridden per-environment
+// from terraform.tfvars; the default establishes the chatbot persona.
+const SYSTEM_PROMPT = "${system_prompt}";
 
 let apiKey = "";
 let isGenerating = false;

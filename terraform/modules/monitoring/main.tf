@@ -158,7 +158,7 @@ resource "aws_cloudwatch_metric_alarm" "no_healthy_targets" {
   period              = 60
   statistic           = "Average"
   threshold           = 1
-  treat_missing_data  = "breaching"
+  treat_missing_data  = "notBreaching"
 
   dimensions = {
     TargetGroup  = var.target_group_arn_suffix

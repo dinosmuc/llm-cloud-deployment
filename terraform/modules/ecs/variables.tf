@@ -23,6 +23,16 @@ variable "target_group_arn" {
   type        = string
 }
 
+variable "alb_arn_suffix" {
+  description = "ALB ARN suffix used as a CloudWatch dimension on the scale-from-zero and scale-in alarms"
+  type        = string
+}
+
+variable "target_group_arn_suffix" {
+  description = "Target-group ARN suffix used to build the resource_label for the ALBRequestCountPerTarget predefined metric"
+  type        = string
+}
+
 variable "ecr_repository_url" {
   description = "ECR repository URL"
   type        = string
@@ -43,8 +53,14 @@ variable "max_capacity" {
   type        = number
 }
 
-variable "api_key" {
-  description = "API key for authentication"
+variable "public_api_key" {
+  description = "User-facing API key. Clients send it in the x-api-key header; nginx validates it before proxying to vLLM."
+  type        = string
+  sensitive   = true
+}
+
+variable "internal_api_key" {
+  description = "Internal token shared between nginx and vLLM. Injected by nginx as Authorization: Bearer when proxying upstream, satisfying vLLM's --api-key check."
   type        = string
   sensitive   = true
 }

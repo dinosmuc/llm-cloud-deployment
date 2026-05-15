@@ -68,10 +68,11 @@ resource "aws_s3_object" "style_css" {
 }
 
 resource "aws_s3_object" "app_js" {
-  bucket       = aws_s3_bucket.frontend.id
-  key          = "app.js"
-  content      = templatefile("${path.module}/../../../frontend/app.js", {
-    alb_url = ""
+  bucket = aws_s3_bucket.frontend.id
+  key    = "app.js"
+  content = templatefile("${path.module}/../../../frontend/app.js", {
+    alb_url       = ""
+    system_prompt = var.system_prompt
   })
   content_type = "application/javascript"
 }

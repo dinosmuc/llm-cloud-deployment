@@ -23,9 +23,9 @@
 #
 # Auth model (works with the nginx sidecar in containers/nginx/):
 #   --api-key wires vLLM's built-in bearer-token check. The value comes from the
-#   VLLM_API_KEY env var, which is set by the ECS task definition and is *internal*
+#   INTERNAL_API_KEY env var, which is set by the ECS task definition and is *internal*
 #   — it never leaves the task. The user-facing key (x-api-key) is validated by
-#   nginx, which then injects "Authorization: Bearer ${VLLM_API_KEY}" upstream.
+#   nginx, which then injects "Authorization: Bearer ${INTERNAL_API_KEY}" upstream.
 #
 # Image size:
 #   Expect ~13-15 GB total (vLLM CUDA base ~7-8 GB + BF16 weights ~5 GB + Python deps).
@@ -42,17 +42,17 @@ RUN HF_TOKEN="$HF_TOKEN" hf download \
       --local-dir /models/gemma-4-E2B-it
 
 ENV MODEL_ID=/models/gemma-4-E2B-it
-ENV VLLM_API_KEY=default
+ENV INTERNAL_API_KEY=default
 
 EXPOSE 8000
 
-# Shell form so ${VLLM_API_KEY} is substituted at container start.
+# Shell form so ${INTERNAL_API_KEY} is substituted at container start.
 # `exec` replaces the shell so vLLM becomes PID 1 and receives signals directly.
 CMD exec vllm serve /models/gemma-4-E2B-it \
     --dtype bfloat16 \
     --max-model-len 32768 \
     --gpu-memory-utilization 0.85 \
     --limit-mm-per-prompt '{"image": 0, "audio": 0}' \
-    --api-key "${VLLM_API_KEY}" \
+    --api-key "${INTERNAL_API_KEY}" \
     --host 0.0.0.0 \
     --port 8000

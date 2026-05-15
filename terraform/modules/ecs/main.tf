@@ -111,7 +111,7 @@ resource "aws_iam_policy" "ecs_task_logs" {
           "logs:PutLogEvents"
         ]
         Resource = [
-          "${aws_cloudwatch_log_group.tgi.arn}:*",
+          "${aws_cloudwatch_log_group.vllm.arn}:*",
           "${aws_cloudwatch_log_group.nginx.arn}:*"
         ]
       }
@@ -147,7 +147,7 @@ resource "aws_launch_template" "ecs" {
     device_name = "/dev/xvda"
 
     ebs {
-      volume_size           = 50
+      volume_size           = 100
       volume_type           = "gp3"
       delete_on_termination = true
     }
@@ -248,12 +248,12 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 
 
 # CLOUDWATCH LOG GROUPS
-resource "aws_cloudwatch_log_group" "tgi" {
-  name              = "/ecs/${var.project_name}/tgi"
+resource "aws_cloudwatch_log_group" "vllm" {
+  name              = "/ecs/${var.project_name}/vllm"
   retention_in_days = 7
 
   tags = {
-    Name = "${var.project_name}-tgi-logs"
+    Name = "${var.project_name}-vllm-logs"
   }
 }
 
@@ -277,23 +277,18 @@ resource "aws_ecs_task_definition" "main" {
 
   container_definitions = jsonencode([
     {
-      name      = "tgi"
-      image     = "${var.ecr_repository_url}:tgi"
+      name      = "vllm"
+      image     = "${var.ecr_repository_url}:vllm"
       essential = true
 
       portMappings = [
         {
-          containerPort = 8080
+          containerPort = 8000
           protocol      = "tcp"
         }
       ]
 
-      command = [
-        "--model-id", "/data/models/phi3",
-        "--port", "8080",
-        "--max-input-length", "2046",
-        "--max-total-tokens", "4096"
-      ]
+      # vLLM gets its arguments from the Dockerfile CMD; no command override here.
 
       resourceRequirements = [
         {
@@ -305,8 +300,15 @@ resource "aws_ecs_task_definition" "main" {
       memory = 14336
       cpu    = 3072
 
+      environment = [
+        {
+          name  = "INTERNAL_API_KEY"
+          value = var.internal_api_key
+        }
+      ]
+
       healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+        command     = ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
         interval    = 30
         timeout     = 10
         retries     = 5
@@ -316,9 +318,9 @@ resource "aws_ecs_task_definition" "main" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.tgi.name
+          "awslogs-group"         = aws_cloudwatch_log_group.vllm.name
           "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "tgi"
+          "awslogs-stream-prefix" = "vllm"
         }
       }
     },
@@ -339,14 +341,18 @@ resource "aws_ecs_task_definition" "main" {
 
       environment = [
         {
-          name  = "API_KEY"
-          value = var.api_key
+          name  = "PUBLIC_API_KEY"
+          value = var.public_api_key
+        },
+        {
+          name  = "INTERNAL_API_KEY"
+          value = var.internal_api_key
         }
       ]
 
       dependsOn = [
         {
-          containerName = "tgi"
+          containerName = "vllm"
           condition     = "HEALTHY"
         }
       ]
@@ -409,7 +415,27 @@ resource "aws_ecs_service" "main" {
 }
 
 
-# AUTO SCALING FOR ECS SERVICE
+# ---------------------------------------------------------------------------
+# Scale-from-zero autoscaling — three cooperating policies
+#
+#   - scale_out_wake  (step):          0 → 1 on first ALB 503 (no targets)
+#   - scale_out_load  (target track):  1 → N as ALB request rate per target rises
+#   - scale_in_idle   (step):          N → 0 after 15 min of ALB silence
+#
+# scale_out_load uses disable_scale_in = true, leaving all scale-in behavior
+# to scale_in_idle. The three policies never conflict because each operates
+# in a different regime:
+#   - scale_out_wake only fires at desired_count = 0 (target tracking cannot
+#     scale from zero because per-target metrics aren't published when there
+#     are no targets to count against)
+#   - scale_out_load only acts at desired_count >= 1 under rising load
+#   - scale_in_idle only fires after 15 consecutive minutes of total silence
+#
+# target_value = 600 req/target/minute is an educated estimate for Gemma 4
+# E2B on L4 GPU at BF16 (roughly 10 concurrent chat conversations per task).
+# Production deployments should benchmark actual throughput and tune.
+# ---------------------------------------------------------------------------
+
 resource "aws_appautoscaling_target" "ecs" {
   max_capacity       = var.max_capacity
   min_capacity       = var.min_capacity
@@ -418,20 +444,99 @@ resource "aws_appautoscaling_target" "ecs" {
   service_namespace  = "ecs"
 }
 
-resource "aws_appautoscaling_policy" "ecs_cpu" {
-  name               = "${var.project_name}-cpu-scaling"
-  policy_type        = "TargetTrackingScaling"
+# Scale OUT: ALB emits HTTPCode_ELB_503_Count when it has no healthy targets.
+resource "aws_appautoscaling_policy" "scale_out_wake" {
+  name               = "${var.project_name}-scale-out-wake"
+  policy_type        = "StepScaling"
+  service_namespace  = aws_appautoscaling_target.ecs.service_namespace
   resource_id        = aws_appautoscaling_target.ecs.resource_id
   scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ExactCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Sum"
+
+    step_adjustment {
+      metric_interval_lower_bound = 0
+      scaling_adjustment          = 1
+    }
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "wake_on_503" {
+  alarm_name          = "${var.project_name}-wake-on-503"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "HTTPCode_ELB_503_Count"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    LoadBalancer = var.alb_arn_suffix
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.scale_out_wake.arn]
+}
+
+# Scale OUT (load): target-tracking on ALB request rate; scales 1 → N as concurrency rises.
+resource "aws_appautoscaling_policy" "scale_out_load" {
+  name               = "${var.project_name}-scale-out-load"
+  policy_type        = "TargetTrackingScaling"
   service_namespace  = aws_appautoscaling_target.ecs.service_namespace
+  resource_id        = aws_appautoscaling_target.ecs.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
 
   target_tracking_scaling_policy_configuration {
-    predefined_metric_specification {
-      predefined_metric_type = "ECSServiceAverageCPUUtilization"
-    }
-
-    target_value       = 70
-    scale_in_cooldown  = 900
+    target_value       = 600
+    scale_in_cooldown  = 0
     scale_out_cooldown = 120
+    disable_scale_in   = true
+
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "${var.alb_arn_suffix}/${var.target_group_arn_suffix}"
+    }
   }
+}
+
+# Scale IN: 15 consecutive minutes of zero ALB requests returns to 0 tasks.
+resource "aws_appautoscaling_policy" "scale_in_idle" {
+  name               = "${var.project_name}-scale-in-idle"
+  policy_type        = "StepScaling"
+  service_namespace  = aws_appautoscaling_target.ecs.service_namespace
+  resource_id        = aws_appautoscaling_target.ecs.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ExactCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Sum"
+
+    step_adjustment {
+      metric_interval_upper_bound = 0
+      scaling_adjustment          = 0
+    }
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "scale_in_on_idle" {
+  alarm_name          = "${var.project_name}-scale-in-on-idle"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 15
+  metric_name         = "RequestCount"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 1
+  treat_missing_data  = "breaching"
+
+  dimensions = {
+    LoadBalancer = var.alb_arn_suffix
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.scale_in_idle.arn]
 }

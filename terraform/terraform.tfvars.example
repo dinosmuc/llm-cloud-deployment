@@ -1,4 +1,7 @@
 # Copy this file to terraform.tfvars and fill in your values
-aws_region   = "eu-central-1"
-project_name = "phi3-inference"
-api_key      = "your-secret-api-key-here"
+aws_region       = "eu-central-1"
+project_name     = "gemma-inference"
+instance_type    = "g6.xlarge"
+public_api_key   = "your-public-user-facing-key-here"
+internal_api_key = "any-random-string-for-internal-nginx-to-vllm-auth"
+# system_prompt  = "optional override; defaults to a sensible chatbot persona"

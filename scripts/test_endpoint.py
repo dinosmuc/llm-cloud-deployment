@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test the Phi-3 inference endpoint with streaming output.
+Test the Gemma 4 inference endpoint with streaming output.
 Usage: python scripts/test_endpoint.py <api_url> <api_key> [prompt]
 """
 
@@ -86,7 +86,7 @@ def test_endpoint(api_url, api_key, prompt):
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python scripts/test_endpoint.py <api_url> <api_key> [prompt]")
-        print('Example: python scripts/test_endpoint.py http://phi3-alb-123.elb.amazonaws.com sk-phi3-abc "What is cloud computing?"')
+        print('Example: python scripts/test_endpoint.py http://gemma4-alb-123.elb.amazonaws.com sk-gemma4-abc "What is cloud computing?"')
         sys.exit(1)
 
     api_url = sys.argv[1]
