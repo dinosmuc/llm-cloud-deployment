@@ -101,6 +101,26 @@ resource "aws_cloudwatch_dashboard" "main" {
   })
 }
 
+# SNS TOPIC FOR ALARM NOTIFICATIONS
+#
+# After `terraform apply`, AWS sends a confirmation email to the subscribed
+# address; the subscription does NOT deliver notifications until the
+# confirmation link is clicked. This is a one-time manual step per address.
+# Only the three observability alarms below publish here — the two functional
+# autoscaling alarms in the ECS module (wake_on_503, scale_in_on_idle) are
+# deliberately silent, because they fire on every cold start and every idle
+# window respectively and would generate alarm fatigue.
+resource "aws_sns_topic" "alerts" {
+  name = "${var.project_name}-alerts"
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+
 # CLOUDWATCH ALARMS
 
 # Alarm 1: High latency
@@ -119,6 +139,9 @@ resource "aws_cloudwatch_metric_alarm" "high_latency" {
   dimensions = {
     LoadBalancer = var.alb_arn_suffix
   }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
 
   tags = {
     Name = "${var.project_name}-high-latency-alarm"
@@ -142,6 +165,9 @@ resource "aws_cloudwatch_metric_alarm" "high_errors" {
     LoadBalancer = var.alb_arn_suffix
   }
 
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
   tags = {
     Name = "${var.project_name}-high-errors-alarm"
   }
@@ -164,6 +190,9 @@ resource "aws_cloudwatch_metric_alarm" "no_healthy_targets" {
     TargetGroup  = var.target_group_arn_suffix
     LoadBalancer = var.alb_arn_suffix
   }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
 
   tags = {
     Name = "${var.project_name}-no-healthy-targets-alarm"

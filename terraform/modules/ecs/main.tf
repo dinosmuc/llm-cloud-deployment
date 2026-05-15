@@ -7,6 +7,39 @@ locals {
   ecs_gpu_ami_id = jsondecode(data.aws_ssm_parameter.ecs_gpu_ami.value)["image_id"]
 }
 
+# ---------------------------------------------------------------------------
+# SSM SecureString parameters
+#
+# The container API keys live here rather than as plaintext env vars in the
+# task definition. The execution role fetches them at task start via the
+# secrets[] mechanism (see container definitions below); the values never
+# appear in `aws ecs describe-task-definition` output or in Terraform state's
+# rendered task-def JSON. Standard tier is free; uses AWS-managed KMS key
+# alias/aws/ssm for encryption at rest.
+# ---------------------------------------------------------------------------
+
+resource "aws_ssm_parameter" "public_api_key" {
+  name        = "/${var.project_name}/public-api-key"
+  description = "User-facing API key validated by nginx (x-api-key header)."
+  type        = "SecureString"
+  value       = var.public_api_key
+
+  tags = {
+    project = var.project_name
+  }
+}
+
+resource "aws_ssm_parameter" "internal_api_key" {
+  name        = "/${var.project_name}/internal-api-key"
+  description = "Internal token shared between nginx and vLLM (Bearer header)."
+  type        = "SecureString"
+  value       = var.internal_api_key
+
+  tags = {
+    project = var.project_name
+  }
+}
+
 # Role 1: EC2 Instance Role — allows ECS agent to register with cluster
 resource "aws_iam_role" "ec2_instance" {
   name = "${var.project_name}-ec2-instance-role"
@@ -74,6 +107,42 @@ resource "aws_iam_role" "ecs_task_execution" {
 resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
   role       = aws_iam_role.ecs_task_execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# Inline policy: lets the execution role fetch the two SSM SecureString
+# parameters at task launch and decrypt them via the AWS-managed SSM KMS key.
+# The kms:ViaService condition scopes Decrypt to KMS calls coming through
+# SSM, so a compromised execution role can't be used as a generic KMS
+# decryption oracle.
+resource "aws_iam_role_policy" "ecs_task_execution_ssm" {
+  name = "${var.project_name}-ecs-task-execution-ssm"
+  role = aws_iam_role.ecs_task_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadAPIKeyParameters"
+        Effect = "Allow"
+        Action = ["ssm:GetParameters"]
+        Resource = [
+          aws_ssm_parameter.public_api_key.arn,
+          aws_ssm_parameter.internal_api_key.arn,
+        ]
+      },
+      {
+        Sid      = "DecryptSSMSecureStrings"
+        Effect   = "Allow"
+        Action   = "kms:Decrypt"
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${var.aws_region}.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
 }
 
 # Role 3: ECS Task Role — permissions for the running containers
@@ -300,10 +369,13 @@ resource "aws_ecs_task_definition" "main" {
       memory = 14336
       cpu    = 3072
 
-      environment = [
+      # API keys come from SSM SecureString — see secrets[] below.
+      environment = []
+
+      secrets = [
         {
-          name  = "INTERNAL_API_KEY"
-          value = var.internal_api_key
+          name      = "INTERNAL_API_KEY"
+          valueFrom = aws_ssm_parameter.internal_api_key.arn
         }
       ]
 
@@ -339,14 +411,17 @@ resource "aws_ecs_task_definition" "main" {
       memory = 256
       cpu    = 256
 
-      environment = [
+      # API keys come from SSM SecureString — see secrets[] below.
+      environment = []
+
+      secrets = [
         {
-          name  = "PUBLIC_API_KEY"
-          value = var.public_api_key
+          name      = "PUBLIC_API_KEY"
+          valueFrom = aws_ssm_parameter.public_api_key.arn
         },
         {
-          name  = "INTERNAL_API_KEY"
-          value = var.internal_api_key
+          name      = "INTERNAL_API_KEY"
+          valueFrom = aws_ssm_parameter.internal_api_key.arn
         }
       ]
 
@@ -453,9 +528,8 @@ resource "aws_appautoscaling_policy" "scale_out_wake" {
   scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
 
   step_scaling_policy_configuration {
-    adjustment_type         = "ExactCapacity"
-    cooldown                = 60
-    metric_aggregation_type = "Sum"
+    adjustment_type = "ExactCapacity"
+    cooldown        = 60
 
     step_adjustment {
       metric_interval_lower_bound = 0
@@ -512,9 +586,8 @@ resource "aws_appautoscaling_policy" "scale_in_idle" {
   scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
 
   step_scaling_policy_configuration {
-    adjustment_type         = "ExactCapacity"
-    cooldown                = 60
-    metric_aggregation_type = "Sum"
+    adjustment_type = "ExactCapacity"
+    cooldown        = 60
 
     step_adjustment {
       metric_interval_upper_bound = 0

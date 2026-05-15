@@ -27,3 +27,8 @@ variable "target_group_arn_suffix" {
   description = "Target group ARN suffix for CloudWatch metrics"
   type        = string
 }
+
+variable "alert_email" {
+  description = "Email address subscribed to the alerts SNS topic"
+  type        = string
+}

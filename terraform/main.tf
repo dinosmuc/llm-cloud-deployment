@@ -1,10 +1,10 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.10.0"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.45"
     }
     random = {
       source  = "hashicorp/random"
@@ -12,12 +12,19 @@ terraform {
     }
   }
 
+  # State backend: S3 with native conditional-write locking (Terraform 1.10+).
+  # Replaces the previous DynamoDB-based locking pattern.
+  #
+  # The state bucket is external infrastructure and must exist before
+  # `terraform init`. Bootstrap commands are documented in the README.
+  # Any previous state bucket and DynamoDB locks table from earlier project
+  # iterations can be deleted from AWS once the new state is established.
   backend "s3" {
-    bucket         = "phi3-terraform-state-ds"
-    key            = "phi3-cloud-deployment/terraform.tfstate"
-    region         = "eu-central-1"
-    dynamodb_table = "terraform-locks"
-    encrypt        = true
+    bucket       = "gemma-inference-tfstate-ds"
+    key          = "gemma-inference/terraform.tfstate"
+    region       = "eu-central-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 
@@ -77,4 +84,5 @@ module "monitoring" {
   service_name            = module.ecs.service_name
   alb_arn_suffix          = module.alb.alb_arn_suffix
   target_group_arn_suffix = module.alb.target_group_arn_suffix
+  alert_email             = var.alert_email
 }

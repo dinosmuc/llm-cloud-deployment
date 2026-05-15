@@ -24,12 +24,23 @@ resource "aws_s3_bucket_public_access_block" "frontend" {
   restrict_public_buckets = true
 }
 
-# CLOUDFRONT ORIGIN ACCESS IDENTITY
-resource "aws_cloudfront_origin_access_identity" "frontend" {
-  comment = "${var.project_name}-oai"
+# CLOUDFRONT ORIGIN ACCESS CONTROL
+# Modern replacement for the legacy OAI. Uses SigV4 to sign CloudFront -> S3
+# requests; lets the S3 bucket policy grant access to the cloudfront.amazonaws.com
+# service principal scoped to this specific distribution via AWS:SourceArn.
+resource "aws_cloudfront_origin_access_control" "frontend" {
+  name                              = "${var.project_name}-oac"
+  description                       = "OAC for CloudFront to access the frontend S3 bucket"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
 }
 
 # S3 BUCKET POLICY (allow CloudFront only)
+# Service-principal-plus-source-arn pattern: grant s3:GetObject to the
+# CloudFront service, but only when the request comes from this specific
+# distribution (AWS:SourceArn condition). Without that condition, any
+# CloudFront distribution in any account could potentially read the bucket.
 resource "aws_s3_bucket_policy" "frontend" {
   bucket = aws_s3_bucket.frontend.id
 
@@ -37,13 +48,18 @@ resource "aws_s3_bucket_policy" "frontend" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "AllowCloudFrontRead"
+        Sid    = "AllowCloudFrontServicePrincipalReadOnly"
         Effect = "Allow"
         Principal = {
-          AWS = aws_cloudfront_origin_access_identity.frontend.iam_arn
+          Service = "cloudfront.amazonaws.com"
         }
         Action   = "s3:GetObject"
         Resource = "${aws_s3_bucket.frontend.arn}/*"
+        Condition = {
+          StringEquals = {
+            "AWS:SourceArn" = aws_cloudfront_distribution.frontend.arn
+          }
+        }
       }
     ]
   })
@@ -84,14 +100,11 @@ resource "aws_cloudfront_distribution" "frontend" {
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
 
-  # Origin 1: S3 bucket for static frontend files
+  # Origin 1: S3 bucket for static frontend files (signed via OAC)
   origin {
-    domain_name = aws_s3_bucket.frontend.bucket_regional_domain_name
-    origin_id   = "s3-frontend"
-
-    s3_origin_config {
-      origin_access_identity = aws_cloudfront_origin_access_identity.frontend.cloudfront_access_identity_path
-    }
+    domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
+    origin_id                = "s3-frontend"
+    origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
   }
 
   # Origin 2: ALB for API requests

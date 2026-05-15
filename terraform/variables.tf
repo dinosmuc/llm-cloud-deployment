@@ -51,3 +51,8 @@ variable "system_prompt" {
   type        = string
   default     = "You are a helpful AI assistant powered by Google's Gemma 4 model and deployed on AWS. Be friendly, clear, and concise. If you don't know something, say so honestly."
 }
+
+variable "alert_email" {
+  description = "Email address that receives CloudWatch alarm notifications (high latency, high error rate, no healthy targets). The address must confirm the SNS subscription via the AWS confirmation email before notifications begin to flow."
+  type        = string
+}

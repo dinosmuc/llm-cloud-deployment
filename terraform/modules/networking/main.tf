@@ -101,10 +101,41 @@ resource "aws_route_table_association" "public_2" {
 }
 
 # ---------------------------------------------------------------------------
-# PRIVATE ROUTE TABLE (no internet route)
+# NAT GATEWAY (egress for private subnets)
+#
+# Single NAT in public subnet 1. If AZ[0] fails, private-subnet egress is
+# lost; production HA would deploy one NAT per AZ at double the cost. Kept
+# single-AZ here as a portfolio-scale trade-off (see Phase 3 narrative).
+# ---------------------------------------------------------------------------
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = {
+    Name = "${var.project_name}-nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_1.id
+
+  tags = {
+    Name = "${var.project_name}-nat"
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# ---------------------------------------------------------------------------
+# PRIVATE ROUTE TABLE (egress via NAT Gateway)
 # ---------------------------------------------------------------------------
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
 
   tags = {
     Name = "${var.project_name}-private-rt"
@@ -175,7 +206,7 @@ resource "aws_security_group" "ecs" {
   }
 
   egress {
-    description = "All outbound (for VPC endpoints)"
+    description = "All outbound (via NAT for AWS APIs; S3 endpoint for ECR layers)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -187,38 +218,12 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# VPC Endpoint Security Group — accepts HTTPS from ECS
-resource "aws_security_group" "vpc_endpoints" {
-  name        = "${var.project_name}-vpce-sg"
-  description = "Allow HTTPS from ECS tasks"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description     = "HTTPS from ECS"
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.ecs.id]
-  }
-
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "${var.project_name}-vpce-sg"
-  }
-}
-
 # ---------------------------------------------------------------------------
-# VPC ENDPOINTS (replace NAT Gateway)
+# VPC ENDPOINTS — S3 gateway only (free; keeps ECR layer pulls off the NAT)
 # ---------------------------------------------------------------------------
 
-# S3 Gateway Endpoint (free)
+# S3 Gateway Endpoint (free). ECR stores image layers in S3; routing those
+# pulls through this endpoint avoids paying NAT $/GB on cold starts.
 resource "aws_vpc_endpoint" "s3" {
   vpc_id       = aws_vpc.main.id
   service_name = "com.amazonaws.${var.aws_region}.s3"
@@ -228,95 +233,5 @@ resource "aws_vpc_endpoint" "s3" {
 
   tags = {
     Name = "${var.project_name}-s3-endpoint"
-  }
-}
-
-# ECR API Interface Endpoint
-resource "aws_vpc_endpoint" "ecr_api" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-
-  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  tags = {
-    Name = "${var.project_name}-ecr-api-endpoint"
-  }
-}
-
-# ECR Docker Interface Endpoint
-resource "aws_vpc_endpoint" "ecr_dkr" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-
-  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  tags = {
-    Name = "${var.project_name}-ecr-dkr-endpoint"
-  }
-}
-
-# CloudWatch Logs Interface Endpoint
-resource "aws_vpc_endpoint" "cloudwatch_logs" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.logs"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-
-  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  tags = {
-    Name = "${var.project_name}-cloudwatch-logs-endpoint"
-  }
-}
-
-# ECS API Interface Endpoint (agent registration)
-resource "aws_vpc_endpoint" "ecs" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecs"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-
-  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  tags = {
-    Name = "${var.project_name}-ecs-endpoint"
-  }
-}
-
-# ECS Agent Interface Endpoint (agent communication)
-resource "aws_vpc_endpoint" "ecs_agent" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecs-agent"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-
-  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  tags = {
-    Name = "${var.project_name}-ecs-agent-endpoint"
-  }
-}
-
-# ECS Telemetry Interface Endpoint (agent health reporting)
-resource "aws_vpc_endpoint" "ecs_telemetry" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecs-telemetry"
-  vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
-
-  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
-
-  tags = {
-    Name = "${var.project_name}-ecs-telemetry-endpoint"
   }
 }
