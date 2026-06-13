@@ -1,4 +1,4 @@
-# Look up the latest ECS-optimised GPU AMI
+// Look up the latest ECS-optimised GPU AMI
 data "aws_ssm_parameter" "ecs_gpu_ami" {
   name = "/aws/service/ecs/optimized-ami/amazon-linux-2023/gpu/recommended"
 }
@@ -7,20 +7,11 @@ locals {
   ecs_gpu_ami_id = jsondecode(data.aws_ssm_parameter.ecs_gpu_ami.value)["image_id"]
 }
 
-# ---------------------------------------------------------------------------
-# SSM SecureString parameters
-#
-# The container API keys live here rather than as plaintext env vars in the
-# task definition. The execution role fetches them at task start via the
-# secrets[] mechanism (see container definitions below); the values never
-# appear in `aws ecs describe-task-definition` output or in Terraform state's
-# rendered task-def JSON. Standard tier is free; uses AWS-managed KMS key
-# alias/aws/ssm for encryption at rest.
-# ---------------------------------------------------------------------------
 
+// SSM SecureString parameters
 resource "aws_ssm_parameter" "public_api_key" {
   name        = "/${var.project_name}/public-api-key"
-  description = "User-facing API key validated by nginx (x-api-key header)."
+  description = "User-facing API key validated by the proxy (x-api-key header)."
   type        = "SecureString"
   value       = var.public_api_key
 
@@ -31,7 +22,7 @@ resource "aws_ssm_parameter" "public_api_key" {
 
 resource "aws_ssm_parameter" "internal_api_key" {
   name        = "/${var.project_name}/internal-api-key"
-  description = "Internal token shared between nginx and vLLM (Bearer header)."
+  description = "Internal token shared between the proxy and vLLM (Bearer header)."
   type        = "SecureString"
   value       = var.internal_api_key
 
@@ -40,7 +31,7 @@ resource "aws_ssm_parameter" "internal_api_key" {
   }
 }
 
-# Role 1: EC2 Instance Role — allows ECS agent to register with cluster
+// Role 1: EC2 Instance Role — allows ECS agent to register with cluster
 resource "aws_iam_role" "ec2_instance" {
   name = "${var.project_name}-ec2-instance-role"
 
@@ -82,7 +73,7 @@ resource "aws_iam_instance_profile" "ec2_instance" {
   role = aws_iam_role.ec2_instance.name
 }
 
-# Role 2: ECS Task Execution Role — allows ECS to pull images and write logs
+// Role 2: ECS Task Execution Role — allows ECS to pull images and write logs
 resource "aws_iam_role" "ecs_task_execution" {
   name = "${var.project_name}-ecs-task-execution-role"
 
@@ -109,11 +100,6 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# Inline policy: lets the execution role fetch the two SSM SecureString
-# parameters at task launch and decrypt them via the AWS-managed SSM KMS key.
-# The kms:ViaService condition scopes Decrypt to KMS calls coming through
-# SSM, so a compromised execution role can't be used as a generic KMS
-# decryption oracle.
 resource "aws_iam_role_policy" "ecs_task_execution_ssm" {
   name = "${var.project_name}-ecs-task-execution-ssm"
   role = aws_iam_role.ecs_task_execution.id
@@ -145,7 +131,7 @@ resource "aws_iam_role_policy" "ecs_task_execution_ssm" {
   })
 }
 
-# Role 3: ECS Task Role — permissions for the running containers
+// Role 3: ECS Task Role — permissions for the running containers
 resource "aws_iam_role" "ecs_task" {
   name = "${var.project_name}-ecs-task-role"
 
@@ -181,7 +167,7 @@ resource "aws_iam_policy" "ecs_task_logs" {
         ]
         Resource = [
           "${aws_cloudwatch_log_group.vllm.arn}:*",
-          "${aws_cloudwatch_log_group.nginx.arn}:*"
+          "${aws_cloudwatch_log_group.proxy.arn}:*"
         ]
       }
     ]
@@ -193,7 +179,7 @@ resource "aws_iam_role_policy_attachment" "ecs_task_cloudwatch" {
   policy_arn = aws_iam_policy.ecs_task_logs.arn
 }
 
-# LAUNCH TEMPLATE
+// LAUNCH TEMPLATE
 resource "aws_launch_template" "ecs" {
   name          = "${var.project_name}-launch-template"
   image_id      = local.ecs_gpu_ami_id
@@ -240,7 +226,7 @@ resource "aws_launch_template" "ecs" {
 }
 
 
-# AUTO SCALING GROUP
+// AUTO SCALING GROUP
 resource "aws_autoscaling_group" "ecs" {
   name                = "${var.project_name}-asg"
   vpc_zone_identifier = var.private_subnet_ids
@@ -273,7 +259,7 @@ resource "aws_autoscaling_group" "ecs" {
 }
 
 
-# ECS CLUSTER
+// ECS CLUSTER
 resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-cluster"
 
@@ -283,7 +269,7 @@ resource "aws_ecs_cluster" "main" {
 }
 
 
-# CAPACITY PROVIDER
+// CAPACITY PROVIDER
 resource "aws_ecs_capacity_provider" "main" {
   name = "${var.project_name}-capacity-provider"
 
@@ -316,7 +302,7 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 }
 
 
-# CLOUDWATCH LOG GROUPS
+// CLOUDWATCH LOG GROUPS
 resource "aws_cloudwatch_log_group" "vllm" {
   name              = "/ecs/${var.project_name}/vllm"
   retention_in_days = 7
@@ -326,17 +312,17 @@ resource "aws_cloudwatch_log_group" "vllm" {
   }
 }
 
-resource "aws_cloudwatch_log_group" "nginx" {
-  name              = "/ecs/${var.project_name}/nginx"
+resource "aws_cloudwatch_log_group" "proxy" {
+  name              = "/ecs/${var.project_name}/proxy"
   retention_in_days = 7
 
   tags = {
-    Name = "${var.project_name}-nginx-logs"
+    Name = "${var.project_name}-proxy-logs"
   }
 }
 
 
-# TASK DEFINITION
+// TASK DEFINITION
 resource "aws_ecs_task_definition" "main" {
   family                   = var.project_name
   network_mode             = "awsvpc"
@@ -357,7 +343,7 @@ resource "aws_ecs_task_definition" "main" {
         }
       ]
 
-      # vLLM gets its arguments from the Dockerfile CMD; no command override here.
+      // vLLM gets its arguments from the Dockerfile CMD; no command override here.
 
       resourceRequirements = [
         {
@@ -369,7 +355,7 @@ resource "aws_ecs_task_definition" "main" {
       memory = 14336
       cpu    = 3072
 
-      # API keys come from SSM SecureString — see secrets[] below.
+      // API keys come from SSM SecureString — see secrets[] below.
       environment = []
 
       secrets = [
@@ -397,8 +383,8 @@ resource "aws_ecs_task_definition" "main" {
       }
     },
     {
-      name      = "nginx"
-      image     = "${var.ecr_repository_url}:nginx"
+      name      = "proxy"
+      image     = "${var.ecr_repository_url}:proxy"
       essential = true
 
       portMappings = [
@@ -411,7 +397,7 @@ resource "aws_ecs_task_definition" "main" {
       memory = 256
       cpu    = 256
 
-      # API keys come from SSM SecureString — see secrets[] below.
+      // API keys come from SSM SecureString — see secrets[] below.
       environment = []
 
       secrets = [
@@ -435,9 +421,9 @@ resource "aws_ecs_task_definition" "main" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.nginx.name
+          "awslogs-group"         = aws_cloudwatch_log_group.proxy.name
           "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "nginx"
+          "awslogs-stream-prefix" = "proxy"
         }
       }
     }
@@ -449,7 +435,7 @@ resource "aws_ecs_task_definition" "main" {
 }
 
 
-# ECS SERVICE
+// ECS SERVICE
 resource "aws_ecs_service" "main" {
   name            = "${var.project_name}-service"
   cluster         = aws_ecs_cluster.main.id
@@ -469,7 +455,7 @@ resource "aws_ecs_service" "main" {
 
   load_balancer {
     target_group_arn = var.target_group_arn
-    container_name   = "nginx"
+    container_name   = "proxy"
     container_port   = 80
   }
 
@@ -490,26 +476,14 @@ resource "aws_ecs_service" "main" {
 }
 
 
-# ---------------------------------------------------------------------------
-# Scale-from-zero autoscaling — three cooperating policies
-#
-#   - scale_out_wake  (step):          0 → 1 on first ALB 503 (no targets)
-#   - scale_out_load  (target track):  1 → N as ALB request rate per target rises
-#   - scale_in_idle   (step):          N → 0 after 15 min of ALB silence
-#
-# scale_out_load uses disable_scale_in = true, leaving all scale-in behavior
-# to scale_in_idle. The three policies never conflict because each operates
-# in a different regime:
-#   - scale_out_wake only fires at desired_count = 0 (target tracking cannot
-#     scale from zero because per-target metrics aren't published when there
-#     are no targets to count against)
-#   - scale_out_load only acts at desired_count >= 1 under rising load
-#   - scale_in_idle only fires after 15 consecutive minutes of total silence
-#
-# target_value = 600 req/target/minute is an educated estimate for Gemma 4
-# E2B on L4 GPU at BF16 (roughly 10 concurrent chat conversations per task).
-# Production deployments should benchmark actual throughput and tune.
-# ---------------------------------------------------------------------------
+/*
+ Scale-from-zero autoscaling — three cooperating policies
+
+   - scale_out_wake  (step):          0 → 1 on first ALB 503 (no targets)
+   - scale_out_load  (target track):  1 → N as ALB request rate per target rises
+   - scale_in_idle   (step):          N → 0 after 15 min of ALB silence
+
+*/
 
 resource "aws_appautoscaling_target" "ecs" {
   max_capacity       = var.max_capacity
@@ -519,7 +493,7 @@ resource "aws_appautoscaling_target" "ecs" {
   service_namespace  = "ecs"
 }
 
-# Scale OUT: ALB emits HTTPCode_ELB_503_Count when it has no healthy targets.
+// Scale OUT: ALB emits HTTPCode_ELB_503_Count when it has no healthy targets.
 resource "aws_appautoscaling_policy" "scale_out_wake" {
   name               = "${var.project_name}-scale-out-wake"
   policy_type        = "StepScaling"
@@ -556,7 +530,7 @@ resource "aws_cloudwatch_metric_alarm" "wake_on_503" {
   alarm_actions = [aws_appautoscaling_policy.scale_out_wake.arn]
 }
 
-# Scale OUT (load): target-tracking on ALB request rate; scales 1 → N as concurrency rises.
+// Scale OUT (load): target-tracking on ALB request rate; scales 1 → N as concurrency rises.
 resource "aws_appautoscaling_policy" "scale_out_load" {
   name               = "${var.project_name}-scale-out-load"
   policy_type        = "TargetTrackingScaling"
@@ -577,7 +551,7 @@ resource "aws_appautoscaling_policy" "scale_out_load" {
   }
 }
 
-# Scale IN: 15 consecutive minutes of zero ALB requests returns to 0 tasks.
+// Scale IN: 15 consecutive minutes of zero ALB requests returns to 0 tasks.
 resource "aws_appautoscaling_policy" "scale_in_idle" {
   name               = "${var.project_name}-scale-in-idle"
   policy_type        = "StepScaling"

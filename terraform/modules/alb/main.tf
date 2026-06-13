@@ -1,5 +1,5 @@
 
-# APPLICATION LOAD BALANCER
+// APPLICATION LOAD BALANCER
 resource "aws_lb" "main" {
   name               = "${var.project_name}-alb"
   internal           = false
@@ -14,7 +14,7 @@ resource "aws_lb" "main" {
 }
 
 
-# TARGET GROUP
+// TARGET GROUP
 resource "aws_lb_target_group" "main" {
   name        = "${var.project_name}-tg"
   port        = 80
@@ -39,7 +39,7 @@ resource "aws_lb_target_group" "main" {
 }
 
 
-# HTTP LISTENER
+// HTTP LISTENER
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
@@ -52,7 +52,7 @@ resource "aws_lb_listener" "http" {
 }
 
 
-# WAF WEB ACL
+// WAF WEB ACL
 resource "aws_wafv2_web_acl" "main" {
   name        = "${var.project_name}-waf"
   description = "Baseline WAF for ALB: AWS Managed Common Rule Set + 1000 req/IP/5min rate limit."
@@ -62,9 +62,6 @@ resource "aws_wafv2_web_acl" "main" {
     allow {}
   }
 
-  # AWSManagedRulesCommonRuleSet covers OWASP Top 10 categories (XSS, SQLi,
-  # common injection patterns). Priority 0 ensures malicious requests are
-  # blocked before they count against the rate-limit budget below.
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 0

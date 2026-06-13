@@ -1,10 +1,8 @@
 #!/bin/bash
 set -e
 
-echo "========================================="
 echo "  Gemma 4 Cloud Deployment — Deploy"
-echo "========================================="
-echo ""
+
 
 cd "$(dirname "$0")/../terraform"
 
@@ -30,8 +28,7 @@ terraform apply tfplan
 rm -f tfplan
 echo ""
 
-echo "========================================="
 echo "  Deployment Complete!"
-echo "========================================="
 echo ""
+
 terraform output

@@ -1,4 +1,4 @@
-# CLOUDWATCH DASHBOARD
+// CLOUDWATCH DASHBOARD
 resource "aws_cloudwatch_dashboard" "main" {
   dashboard_name = "${var.project_name}-dashboard"
 
@@ -101,15 +101,8 @@ resource "aws_cloudwatch_dashboard" "main" {
   })
 }
 
-# SNS TOPIC FOR ALARM NOTIFICATIONS
-#
-# After `terraform apply`, AWS sends a confirmation email to the subscribed
-# address; the subscription does NOT deliver notifications until the
-# confirmation link is clicked. This is a one-time manual step per address.
-# Only the three observability alarms below publish here — the two functional
-# autoscaling alarms in the ECS module (wake_on_503, scale_in_on_idle) are
-# deliberately silent, because they fire on every cold start and every idle
-# window respectively and would generate alarm fatigue.
+// SNS TOPIC FOR ALARM NOTIFICATIONS
+
 resource "aws_sns_topic" "alerts" {
   name = "${var.project_name}-alerts"
 }
@@ -121,9 +114,9 @@ resource "aws_sns_topic_subscription" "email" {
 }
 
 
-# CLOUDWATCH ALARMS
+// CLOUDWATCH ALARMS
 
-# Alarm 1: High latency
+// Alarm 1: High latency
 resource "aws_cloudwatch_metric_alarm" "high_latency" {
   alarm_name          = "${var.project_name}-high-latency"
   alarm_description   = "ALB response time p99 above 10 seconds"
@@ -148,7 +141,7 @@ resource "aws_cloudwatch_metric_alarm" "high_latency" {
   }
 }
 
-# Alarm 2: High error rate
+// Alarm 2: High error rate
 resource "aws_cloudwatch_metric_alarm" "high_errors" {
   alarm_name          = "${var.project_name}-high-errors"
   alarm_description   = "More than 10 HTTP 5XX errors per minute"
@@ -173,7 +166,7 @@ resource "aws_cloudwatch_metric_alarm" "high_errors" {
   }
 }
 
-# Alarm 3: No healthy targets
+// Alarm 3: No healthy targets
 resource "aws_cloudwatch_metric_alarm" "no_healthy_targets" {
   alarm_name          = "${var.project_name}-no-healthy-targets"
   alarm_description   = "No healthy targets registered with ALB"

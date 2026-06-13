@@ -54,13 +54,13 @@ variable "max_capacity" {
 }
 
 variable "public_api_key" {
-  description = "User-facing API key. Clients send it in the x-api-key header; nginx validates it before proxying to vLLM."
+  description = "User-facing API key. Clients send it in the x-api-key header; the proxy validates it before proxying to vLLM."
   type        = string
   sensitive   = true
 }
 
 variable "internal_api_key" {
-  description = "Internal token shared between nginx and vLLM. Injected by nginx as Authorization: Bearer when proxying upstream, satisfying vLLM's --api-key check."
+  description = "Internal token shared between the proxy and vLLM. Injected by the proxy as Authorization: Bearer when proxying upstream, satisfying vLLM's --api-key check."
   type        = string
   sensitive   = true
 }

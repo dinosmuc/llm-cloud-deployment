@@ -1,11 +1,13 @@
 
-# RANDOM ID (for unique bucket name)
+// RANDOM ID (for unique bucket name)
+
 resource "random_id" "bucket_suffix" {
   byte_length = 4
 }
 
 
-# S3 BUCKET
+// S3 BUCKET
+
 resource "aws_s3_bucket" "frontend" {
   bucket        = "${var.project_name}-frontend-${random_id.bucket_suffix.hex}"
   force_destroy = true
@@ -24,10 +26,8 @@ resource "aws_s3_bucket_public_access_block" "frontend" {
   restrict_public_buckets = true
 }
 
-# CLOUDFRONT ORIGIN ACCESS CONTROL
-# Modern replacement for the legacy OAI. Uses SigV4 to sign CloudFront -> S3
-# requests; lets the S3 bucket policy grant access to the cloudfront.amazonaws.com
-# service principal scoped to this specific distribution via AWS:SourceArn.
+// CLOUDFRONT ORIGIN ACCESS CONTROL
+
 resource "aws_cloudfront_origin_access_control" "frontend" {
   name                              = "${var.project_name}-oac"
   description                       = "OAC for CloudFront to access the frontend S3 bucket"
@@ -36,11 +36,8 @@ resource "aws_cloudfront_origin_access_control" "frontend" {
   signing_protocol                  = "sigv4"
 }
 
-# S3 BUCKET POLICY (allow CloudFront only)
-# Service-principal-plus-source-arn pattern: grant s3:GetObject to the
-# CloudFront service, but only when the request comes from this specific
-# distribution (AWS:SourceArn condition). Without that condition, any
-# CloudFront distribution in any account could potentially read the bucket.
+// S3 BUCKET POLICY (allow CloudFront only)
+
 resource "aws_s3_bucket_policy" "frontend" {
   bucket = aws_s3_bucket.frontend.id
 
@@ -66,7 +63,7 @@ resource "aws_s3_bucket_policy" "frontend" {
 }
 
 
-# UPLOAD FRONTEND FILES
+// UPLOAD FRONTEND FILES
 resource "aws_s3_object" "index_html" {
   bucket       = aws_s3_bucket.frontend.id
   key          = "index.html"
@@ -94,20 +91,20 @@ resource "aws_s3_object" "app_js" {
 }
 
 
-# CLOUDFRONT DISTRIBUTION
+// CLOUDFRONT DISTRIBUTION
 resource "aws_cloudfront_distribution" "frontend" {
   enabled             = true
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
 
-  # Origin 1: S3 bucket for static frontend files (signed via OAC)
+  // Origin 1: S3 bucket for static frontend files (signed via OAC)
   origin {
     domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
     origin_id                = "s3-frontend"
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
   }
 
-  # Origin 2: ALB for API requests
+  // Origin 2: ALB for API requests
   origin {
     domain_name = var.alb_dns_name
     origin_id   = "alb-api"
@@ -120,7 +117,7 @@ resource "aws_cloudfront_distribution" "frontend" {
     }
   }
 
-  # Default: serve static files from S3
+  // Default: serve static files from S3
   default_cache_behavior {
     allowed_methods  = ["GET", "HEAD"]
     cached_methods   = ["GET", "HEAD"]
@@ -140,9 +137,9 @@ resource "aws_cloudfront_distribution" "frontend" {
     max_ttl                = 31536000
   }
 
-  # API: proxy /generate and /generate_stream to ALB
+  // API: proxy the OpenAI chat-completions endpoint to the ALB
   ordered_cache_behavior {
-    path_pattern     = "/generate*"
+    path_pattern     = "/v1/*"
     allowed_methods  = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods   = ["GET", "HEAD"]
     target_origin_id = "alb-api"
@@ -163,7 +160,7 @@ resource "aws_cloudfront_distribution" "frontend" {
     max_ttl                = 0
   }
 
-  # API: proxy /health to ALB
+  // API: proxy /health to ALB
   ordered_cache_behavior {
     path_pattern     = "/health"
     allowed_methods  = ["GET", "HEAD"]

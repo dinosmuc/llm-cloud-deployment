@@ -22,7 +22,7 @@ flowchart TB
 
     subgraph vpc["VPC 10.0.0.0/16"]
         subgraph priv["Private subnets, 2 AZs"]
-            task["ECS task on g6.xlarge<br/>nginx :80 → vLLM :8000<br/>NVIDIA L4 (24 GB, BF16)"]
+            task["ECS task on g6.xlarge<br/>proxy :80 → vLLM :8000<br/>NVIDIA L4 (24 GB, BF16)"]
         end
         nat["NAT Gateway (public_1)"]
         s3gw["S3 Gateway endpoint"]
@@ -41,7 +41,7 @@ flowchart TB
     task -.->|"logs + metrics"| cwsns
 ```
 
-**Request flow (chat message).** The browser loads `index.html`, `style.css`, and `app.js` from CloudFront's S3 origin. On user input, `app.js` issues `POST /v1/chat/completions` as a *same-origin* relative path; CloudFront's `/generate*` and `/health` cache behaviors route those to the ALB origin. The ALB forwards to the ECS task on container port 80 (IP-mode targets, `awsvpc` networking). The **nginx** container validates the `x-api-key` header, then proxies to `127.0.0.1:8000/v1/chat/completions` with `Authorization: Bearer <internal_api_key>` injected. **vLLM** streams the OpenAI Chat Completions SSE format back; nginx, ALB, and CloudFront pass each chunk through unbuffered (`proxy_buffering off`, no caching). The browser parses `choices[0].delta.content` and appends tokens to the assistant bubble in real time.
+**Request flow (chat message).** The browser loads `index.html`, `style.css`, and `app.js` from CloudFront's S3 origin. On user input, `app.js` issues `POST /v1/chat/completions` as a *same-origin* relative path; CloudFront's `/v1/*` and `/health` cache behaviors route those to the ALB origin. The ALB forwards to the ECS task on container port 80 (IP-mode targets, `awsvpc` networking). The **proxy** container — a small FastAPI service — validates the `x-api-key` header, then proxies to `127.0.0.1:8000/v1/chat/completions` with `Authorization: Bearer <internal_api_key>` injected. **vLLM** streams the OpenAI Chat Completions SSE format back; the proxy streams each raw chunk straight through (`httpx` stream + `StreamingResponse`, no buffering or caching), and ALB and CloudFront pass them on unbuffered. The browser parses `choices[0].delta.content` and appends tokens to the assistant bubble in real time.
 
 ## Stack
 
@@ -52,7 +52,7 @@ flowchart TB
 | Compute | ECS-on-EC2, `g6.xlarge`, 1× NVIDIA L4 (24 GB, Ada `sm_89`, native BF16) |
 | Model serving | vLLM v0.20.2, OpenAI-compatible HTTP API on port 8000 |
 | Model | `google/gemma-4-E2B-it` (instruction-tuned, ungated, Apache 2.0), BF16 |
-| Sidecar | `nginx:alpine` — `x-api-key` validation + SSE-friendly reverse proxy |
+| Sidecar | FastAPI proxy (`python:3.14-slim`) — `x-api-key` validation + SSE-friendly reverse proxy |
 | Networking | VPC, 2 AZs, single NAT Gateway in public subnet, S3 Gateway endpoint |
 | Edge | CloudFront (default cert, Origin Access Control), WAFv2 (AWS Managed Common Rule Set + 1000 req/IP/5 min rate limit) |
 | Secrets | Two SSM `SecureString` parameters; ECS execution role decrypts at task launch |
@@ -79,7 +79,7 @@ SSE-S3 encryption is automatic on new buckets (no separate step). Versioning is 
 You also need:
 
 - AWS CLI configured (`aws configure`) with credentials for an account that has GPU quota — specifically the **Running On-Demand G and VT instances** vCPU limit must be ≥ 4 in your target region.
-- Docker (for building the vLLM and nginx images locally before pushing to ECR).
+- Docker (for building the vLLM and proxy images locally before pushing to ECR).
 - Terraform ≥ 1.10.
 
 ## Configuration
@@ -99,7 +99,7 @@ Then edit `terraform.tfvars` and fill in the four required values:
 | `min_capacity` | no | `0` | Minimum ECS service tasks (0 enables scale-to-zero) |
 | `max_capacity` | no | `3` | Maximum ECS service tasks (ceiling for load-based scale-out) |
 | `public_api_key` | **yes** | — | User-facing token; clients send it in the `x-api-key` header |
-| `internal_api_key` | **yes** | — | Token shared between nginx and vLLM; nginx injects it as `Authorization: Bearer` |
+| `internal_api_key` | **yes** | — | Token shared between the proxy and vLLM; the proxy injects it as `Authorization: Bearer` |
 | `system_prompt` | no | (sensible chatbot-persona string) | Prepended as the first message in every conversation |
 | `alert_email` | **yes** | — | Email subscribed to the SNS alerts topic |
 
@@ -116,7 +116,7 @@ terraform init                          # connects to the state bucket
 terraform apply -target=module.ecr      # ECR repo must exist before images can push
 
 cd ..
-./scripts/build_and_push.sh             # build + push the vllm and nginx images
+./scripts/build_and_push.sh             # build + push the vllm and proxy images
 
 cd terraform
 terraform apply                          # everything else
@@ -146,7 +146,7 @@ Open the `frontend_url` from `terraform output`. Paste the `public_api_key` valu
 5. EC2 boots, ECS agent registers (~30 s).
 6. ECS pulls the ~18 GB vLLM image. The bulk model-weight layer goes over the **S3 Gateway endpoint** (free); the smaller vLLM runtime layers go over the NAT Gateway.
 7. vLLM starts, loads the Gemma 4 weights into the L4's VRAM, opens port 8000.
-8. nginx (which waited on vLLM's `HEALTHY` status via `dependsOn`) starts.
+8. The proxy (which waited on vLLM's `HEALTHY` status via `dependsOn`) starts.
 9. ALB target group reports healthy.
 10. The frontend's `retryUntilReady` polls `/health` every 15 s; on the first OK it automatically re-sends the original message.
 

@@ -77,8 +77,6 @@ async function sendMessage() {
     const assistantDiv = addMessage("assistant", "");
 
     try {
-        // OpenAI-compatible chat completions endpoint (served by vLLM via nginx).
-        // No conversation history yet — every send is a fresh [system, user] pair.
         const response = await fetch(API_URL + "/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -119,13 +117,6 @@ async function sendMessage() {
             return;
         }
 
-        // Read SSE stream — OpenAI Chat Completions format:
-        //   data: {"choices":[{"delta":{"role":"assistant"}}], ...}     <- initial chunk, ignored
-        //   data: {"choices":[{"delta":{"content":"Hello"}}], ...}      <- token chunks
-        //   ...
-        //   data: {"choices":[{"delta":{}, "finish_reason":"stop"}], ...} <- end-of-message chunk
-        //   data: {"choices":[], "usage":{...}}                          <- optional usage stats
-        //   data: [DONE]
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let fullText = "";
@@ -185,10 +176,8 @@ async function sendMessage() {
 
 async function retryUntilReady(text, messageDiv) {
     let attempts = 0;
-    const maxAttempts = 40;   // 40 × 15 s = 10 min ceiling (cold start is realistically 6–8 min)
+    const maxAttempts = 40;  
 
-    // Switch the status pill from "Generating..." to "Warming up..." so the
-    // user doesn't think the model is actively producing tokens during this wait.
     status.textContent = "Warming up...";
     status.className = "status connecting";
 

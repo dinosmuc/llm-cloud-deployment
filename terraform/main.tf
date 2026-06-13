@@ -1,3 +1,4 @@
+//TERRAFORM SETTINGS
 terraform {
   required_version = ">= 1.10.0"
 
@@ -12,13 +13,6 @@ terraform {
     }
   }
 
-  # State backend: S3 with native conditional-write locking (Terraform 1.10+).
-  # Replaces the previous DynamoDB-based locking pattern.
-  #
-  # The state bucket is external infrastructure and must exist before
-  # `terraform init`. Bootstrap commands are documented in the README.
-  # Any previous state bucket and DynamoDB locks table from earlier project
-  # iterations can be deleted from AWS once the new state is established.
   backend "s3" {
     bucket       = "gemma-inference-tfstate-ds"
     key          = "gemma-inference/terraform.tfstate"
@@ -28,10 +22,12 @@ terraform {
   }
 }
 
+// AWS PROVIDER
 provider "aws" {
   region = var.aws_region
 }
 
+//MODULES
 module "networking" {
   source       = "./modules/networking"
   project_name = var.project_name

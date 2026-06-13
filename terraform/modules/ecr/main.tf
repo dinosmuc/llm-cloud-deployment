@@ -15,8 +15,8 @@ resource "aws_ecr_repository" "main" {
 resource "aws_ecr_lifecycle_policy" "main" {
   repository = aws_ecr_repository.main.name
 
-  # One rule per tag prefix so that pushing nginx revisions never evicts the
-  # expensive vllm image (10-15 min rebuild because of the baked Gemma weights).
+  // One rule per tag prefix so that pushing proxy revisions never evicts the
+  // expensive vllm image (10-15 min rebuild because of the baked Gemma weights).
   policy = jsonencode({
     rules = [
       {
@@ -32,10 +32,10 @@ resource "aws_ecr_lifecycle_policy" "main" {
       },
       {
         rulePriority = 2
-        description  = "Keep last 5 nginx images"
+        description  = "Keep last 5 proxy images"
         selection = {
           tagStatus     = "tagged"
-          tagPrefixList = ["nginx"]
+          tagPrefixList = ["proxy"]
           countType     = "imageCountMoreThan"
           countNumber   = 5
         }

@@ -1,13 +1,13 @@
-# ---------------------------------------------------------------------------
-# DATA SOURCES
-# ---------------------------------------------------------------------------
+
+// DATA SOURCES
+
 data "aws_availability_zones" "available" {
   state = "available"
 }
 
-# ---------------------------------------------------------------------------
-# VPC
-# ---------------------------------------------------------------------------
+ 
+// VPC
+ 
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -18,9 +18,9 @@ resource "aws_vpc" "main" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# PUBLIC SUBNETS (for ALB)
-# ---------------------------------------------------------------------------
+ 
+// PUBLIC SUBNETS (for ALB)
+ 
 resource "aws_subnet" "public_1" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
@@ -43,9 +43,9 @@ resource "aws_subnet" "public_2" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# PRIVATE SUBNETS (for ECS tasks)
-# ---------------------------------------------------------------------------
+ 
+// PRIVATE SUBNETS (for ECS tasks)
+ 
 resource "aws_subnet" "private_1" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.10.0/24"
@@ -66,9 +66,9 @@ resource "aws_subnet" "private_2" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# INTERNET GATEWAY + PUBLIC ROUTE TABLE
-# ---------------------------------------------------------------------------
+ 
+// INTERNET GATEWAY + PUBLIC ROUTE TABLE
+ 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
@@ -100,13 +100,9 @@ resource "aws_route_table_association" "public_2" {
   route_table_id = aws_route_table.public.id
 }
 
-# ---------------------------------------------------------------------------
-# NAT GATEWAY (egress for private subnets)
-#
-# Single NAT in public subnet 1. If AZ[0] fails, private-subnet egress is
-# lost; production HA would deploy one NAT per AZ at double the cost. Kept
-# single-AZ here as a portfolio-scale trade-off (see Phase 3 narrative).
-# ---------------------------------------------------------------------------
+ 
+ // NAT GATEWAY (egress for private subnets)
+ 
 resource "aws_eip" "nat" {
   domain = "vpc"
 
@@ -126,9 +122,9 @@ resource "aws_nat_gateway" "main" {
   depends_on = [aws_internet_gateway.main]
 }
 
-# ---------------------------------------------------------------------------
-# PRIVATE ROUTE TABLE (egress via NAT Gateway)
-# ---------------------------------------------------------------------------
+ 
+ // PRIVATE ROUTE TABLE (egress via NAT Gateway)
+ 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
@@ -152,11 +148,11 @@ resource "aws_route_table_association" "private_2" {
   route_table_id = aws_route_table.private.id
 }
 
-# ---------------------------------------------------------------------------
-# SECURITY GROUPS
-# ---------------------------------------------------------------------------
+ 
+ // SECURITY GROUPS
+ 
 
-# ALB Security Group — allows internet traffic on 80 and 443
+ // ALB Security Group — allows internet traffic on 80 and 443
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb-sg"
   description = "Allow HTTP and HTTPS from internet"
@@ -191,7 +187,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# ECS Security Group — only accepts traffic from ALB
+ // ECS Security Group — only accepts traffic from ALB
 resource "aws_security_group" "ecs" {
   name        = "${var.project_name}-ecs-sg"
   description = "Allow traffic from ALB only"
@@ -218,12 +214,9 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# VPC ENDPOINTS — S3 gateway only (free; keeps ECR layer pulls off the NAT)
-# ---------------------------------------------------------------------------
-
-# S3 Gateway Endpoint (free). ECR stores image layers in S3; routing those
-# pulls through this endpoint avoids paying NAT $/GB on cold starts.
+ 
+ // VPC ENDPOINTS — S3 gateway only (free; keeps ECR layer pulls off the NAT)
+ 
 resource "aws_vpc_endpoint" "s3" {
   vpc_id       = aws_vpc.main.id
   service_name = "com.amazonaws.${var.aws_region}.s3"
