@@ -49,7 +49,7 @@ variable "internal_api_key" {
 variable "system_prompt" {
   description = "System message prepended to every chat. Establishes the chatbot's persona."
   type        = string
-  default     = "You are a helpful AI assistant powered by Google's Gemma 4 model and deployed on AWS. Be friendly, clear, and concise. If you don't know something, say so honestly."
+  default     = "You are a helpful AI assistant. Be friendly, clear, and concise. If you don't know something, say so honestly."
 }
 
 variable "alert_email" {

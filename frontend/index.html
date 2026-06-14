@@ -3,22 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemma 4 Chat</title>
+    <title>AI Assistant</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="chat-container">
         <header class="chat-header">
-            <h1>Gemma 4 Chat</h1>
+            <div class="chat-title">
+                <h1>AI Assistant</h1>
+                <p class="chat-subtitle">Ask anything — answers stream in real time</p>
+            </div>
             <span class="status" id="status">Disconnected</span>
         </header>
 
         <div class="api-key-bar" id="apiKeyBar">
-            <input type="password" id="apiKeyInput" placeholder="Enter your API key" />
+            <input type="password" id="apiKeyInput" placeholder="Enter your API key to start" />
             <button id="connectBtn">Connect</button>
         </div>
 
-        <div class="messages" id="messages"></div>
+        <div class="messages" id="messages" data-placeholder="Start the conversation by typing a message below."></div>
 
         <div class="input-bar">
             <textarea id="userInput" placeholder="Type a message..." rows="1" disabled></textarea>
