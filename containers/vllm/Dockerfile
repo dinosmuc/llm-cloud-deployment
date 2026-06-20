@@ -6,7 +6,6 @@ RUN HF_TOKEN="$HF_TOKEN" hf download \
       google/gemma-4-E2B-it \
       --local-dir /models/gemma-4-E2B-it
 
-ENV MODEL_ID=/models/gemma-4-E2B-it
 ENV INTERNAL_API_KEY=default
 
 EXPOSE 8000

@@ -4,9 +4,9 @@ Google Gemma 4 E2B IT served via vLLM on ECS-on-EC2, with scale-to-zero, SSE tok
 
 ## What this is
 
-A portfolio project for IU's *Cloud Programming* module (DLBSEPCP01_E). The deployment runs end-to-end on AWS: a real GPU-backed instruction-tuned LLM behind a public-facing chat interface, with the entire stack defined in Terraform.
+A personal project exploring end-to-end LLM deployment on AWS: a real GPU-backed instruction-tuned LLM behind a public-facing chat interface, with the entire stack defined in Terraform.
 
-The system idles at zero EC2 instances when nobody is using it, wakes up automatically on the first request, streams tokens to the browser as they're generated, and falls back to zero after 15 minutes of silence. Cost-aware by design — idle baseline is mostly the NAT Gateway and ALB; the expensive GPU only runs while there's actual chat traffic.
+The system idles at zero EC2 instances when nobody is using it, wakes up automatically on the first request, streams tokens to the browser as they're generated, and falls back to zero after 15 minutes of silence. Cost-aware by design — idle baseline is mostly the NAT Gateways and ALB; the expensive GPU only runs while there's actual chat traffic.
 
 ## Architecture
 
@@ -24,7 +24,7 @@ flowchart TB
         subgraph priv["Private subnets, 2 AZs"]
             task["ECS task on g6.xlarge<br/>proxy :80 → vLLM :8000<br/>NVIDIA L4 (24 GB, BF16)"]
         end
-        nat["NAT Gateway (public_1)"]
+        nat["NAT Gateways<br/>one per AZ (HA)"]
         s3gw["S3 Gateway endpoint"]
     end
 
@@ -53,7 +53,7 @@ flowchart TB
 | Model serving | vLLM v0.20.2, OpenAI-compatible HTTP API on port 8000 |
 | Model | `google/gemma-4-E2B-it` (instruction-tuned, ungated, Apache 2.0), BF16 |
 | Sidecar | FastAPI proxy (`python:3.14-slim`) — `x-api-key` validation + SSE-friendly reverse proxy |
-| Networking | VPC, 2 AZs, single NAT Gateway in public subnet, S3 Gateway endpoint |
+| Networking | VPC, 2 AZs, one NAT Gateway per AZ (HA), S3 Gateway endpoint |
 | Edge | CloudFront (default cert, Origin Access Control), WAFv2 (AWS Managed Common Rule Set + 1000 req/IP/5 min rate limit) |
 | Secrets | Two SSM `SecureString` parameters; ECS execution role decrypts at task launch |
 | Observability | CloudWatch dashboard (6 widgets), 3 SNS-subscribed alarms, 2 silent autoscaling-trigger alarms |
@@ -88,7 +88,7 @@ You also need:
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 ```
 
-Then edit `terraform.tfvars` and fill in the four required values:
+Then edit `terraform.tfvars` and fill in the three required values (`public_api_key`, `internal_api_key`, `alert_email`):
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -108,9 +108,19 @@ Both API keys are stored as `SecureString` parameters in SSM, not as plaintext e
 ## Deploy
 
 ```bash
-git clone https://github.com/dinosmuc/phi3-cloud-deployment.git
-cd phi3-cloud-deployment
+git clone https://github.com/dinosmuc/llm-cloud-deployment.git
+cd llm-cloud-deployment
+```
 
+**One-command deploy.** `scripts/deploy.sh` runs the three ordered steps below for you, with a confirmation prompt at each:
+
+```bash
+./scripts/deploy.sh                       # init → ECR → build/push → full apply → output
+```
+
+The ordering is not optional: the ECR repository must exist before images can be pushed, and the images must be in ECR before the rest of the stack scales a task up — otherwise the first request fails with an image-pull error. The script encodes that order. To run it by hand instead (e.g. to understand each step):
+
+```bash
 cd terraform
 terraform init                          # connects to the state bucket
 terraform apply -target=module.ecr      # ECR repo must exist before images can push
@@ -144,7 +154,7 @@ Open the `frontend_url` from `terraform output`. Paste the `public_api_key` valu
 3. `scale_out_wake` policy sets ECS service desired count from 0 to 1.
 4. ECS asks the capacity provider for capacity → ASG launches a `g6.xlarge` instance (~90 s).
 5. EC2 boots, ECS agent registers (~30 s).
-6. ECS pulls the ~18 GB vLLM image. The bulk model-weight layer goes over the **S3 Gateway endpoint** (free); the smaller vLLM runtime layers go over the NAT Gateway.
+6. ECS pulls the ~18 GB vLLM image. The bulk model-weight layer goes over the **S3 Gateway endpoint** (free); the smaller vLLM runtime layers go over the task's same-AZ NAT Gateway.
 7. vLLM starts, loads the Gemma 4 weights into the L4's VRAM, opens port 8000.
 8. The proxy (which waited on vLLM's `HEALTHY` status via `dependsOn`) starts.
 9. ALB target group reports healthy.
@@ -164,7 +174,7 @@ Three cooperating policies, each handling a distinct regime so they never confli
 | `scale_out_load` | Target tracking | `ALBRequestCountPerTarget` > 600 req/target/min | 1 → up to `max_capacity` |
 | `scale_in_idle` | Step (ExactCapacity = 0) | 15 consecutive minutes of zero ALB requests | N → 0 |
 
-The wake policy uses `HTTPCode_ELB_503_Count` rather than target-group metrics, because per-target metrics aren't published when no targets exist — the ALB's own 503 counter is the only signal available at `desired_count = 0`. The load policy sets `disable_scale_in = true` so it never fights the idle policy; all scale-in is delegated to `scale_in_idle`. For a single-user portfolio demo the system spends almost all of its time at 0 or 1; `max_capacity = 3` is architectural headroom that only comes into play under genuine concurrent load.
+The wake policy uses `HTTPCode_ELB_503_Count` rather than target-group metrics, because per-target metrics aren't published when no targets exist — the ALB's own 503 counter is the only signal available at `desired_count = 0`. The load policy sets `disable_scale_in = true` so it never fights the idle policy; all scale-in is delegated to `scale_in_idle`. For typical single-user usage the system spends almost all of its time at 0 or 1; `max_capacity = 3` is architectural headroom that only comes into play under genuine concurrent load.
 
 ## Cost
 
@@ -172,35 +182,37 @@ Rough monthly figures for `eu-central-1`. "Idle" is what you pay when the servic
 
 | Item | Idle | Active (per hour of GPU runtime) |
 |---|---|---|
-| NAT Gateway | ~$38 | + ~$0.05/GB processed |
+| NAT Gateways (2 × one per AZ, HA) | ~$76 | + ~$0.05/GB processed |
 | ALB | ~$16 | + LCU charges |
 | WAFv2 (Web ACL + managed rule set + rule) | ~$6 | + $0.60 per million requests |
 | CloudWatch (logs, dashboard, alarms) | ~$2 | + log ingestion |
 | ECR (image storage, ~18 GB) | ~$1.80 | — |
 | `g6.xlarge` (NVIDIA L4 on-demand) | — | ~$0.95 / hour |
 | SSM Standard, S3 Gateway endpoint, SNS standard | $0 | — |
-| **Estimated total** | **~$65 / month** | **+ GPU runtime** |
+| **Estimated total** | **~$102 / month** | **+ GPU runtime** |
 
-The NAT Gateway dominates the idle bill — a deliberate trade-off vs the earlier 6 × interface VPC endpoints at ~$96/month idle. For a typical 6-week evaluation window with ~20 hours of cumulative active GPU time, expect roughly **€80–110 total**.
+The two NAT Gateways dominate the idle bill. This is the *if-left-running* figure; in practice the stack is torn down between sessions, so the idle baseline only accrues while deployed — at ~$0.10/hour for both NATs combined, the HA second NAT adds only ~5 cents per hour of testing. Over ~20 hours of cumulative active GPU time (tearing down between sessions), expect roughly **€30–60 total**.
 
 ## Trade-offs and known limitations
 
-Listed plainly so the design choices are visible to a reviewer:
+Listed plainly so the design choices are visible:
 
-- **Single-AZ NAT Gateway.** Outbound resilience is lost if AZ[0] fails. Production HA would deploy one NAT per AZ (~$76/month instead of ~$38). Accepted because of portfolio scope.
+- **NAT Gateway cost (HA).** The deployment runs one NAT Gateway per AZ so an AZ failure can't sever the other AZ's egress and cross-AZ data-transfer charges are avoided — the production-correct pattern. The trade-off is ~$76/month idle for the two NATs vs ~$38 for a single shared one; acceptable here because the stack is destroyed between sessions, so NAT cost only accrues while actually deployed.
 - **Cold-start latency of 5–8 minutes** on the first request after idle. Inherent to GPU scale-to-zero: ASG launch + 18 GB image pull + model load. The frontend handles it gracefully (10-minute retry window, clear progress messaging), but a real user would notice.
 - **State bucket name `gemma-inference-tfstate-ds` is hardcoded** in the backend block. Terraform backends cannot reference variables, so reusing this codebase for a different AWS account or environment requires either editing the backend `bucket` value directly or supplying `-backend-config` overrides at `terraform init` time.
 - **`scale_out_load` target of 600 req/target/min is an educated estimate**, not a benchmark. L4-on-Gemma-4-E2B-BF16 real throughput should be measured under realistic prompt-length distributions and the value tuned. The current setting was chosen to roughly correspond to ~10 concurrent conversations per task.
 - **HTTPS terminates at CloudFront only.** The CloudFront → ALB hop is plain HTTP, and the certificate is the default `*.cloudfront.net`. A production deployment would add an ACM certificate in `us-east-1` (CloudFront's required region) plus another in the ALB's region, set up Route 53, and switch the CloudFront origin protocol policy to `https-only`.
 - **Effective single-task ceiling in practice.** `max_capacity = 3` is configured but a single-user demo never hits the conditions that would trigger load-based scale-out. The architecture supports it; the demo just doesn't exercise it.
-- **GitHub repository name still reads `phi3-cloud-deployment`** even though the code now serves Gemma 4. Renaming the repo is a one-click operation in the GitHub UI but is treated as out-of-scope here so that historical clone URLs continue to resolve for graders.
 
 ## Teardown
 
 ```bash
-cd terraform
-terraform destroy
+./scripts/destroy.sh        # or: cd terraform && terraform destroy
 ```
+
+`destroy.sh` is a thin convenience wrapper (it `cd`s into `terraform/` and confirms before running `terraform destroy`); plain `terraform destroy` is equivalent.
+
+**If the destroy times out** waiting on the ECS service to reach `INACTIVE` (it can sit in `DRAINING` past the 20-minute wait when a capacity provider with managed termination protection is in play), **just re-run it** — by the second run the task has finished draining and the destroy completes, including terminating the GPU instance via the ASG.
 
 Two things `terraform destroy` does *not* remove — both are external infrastructure:
 
