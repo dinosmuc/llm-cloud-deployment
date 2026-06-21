@@ -105,7 +105,7 @@ async function sendMessage() {
 
         if (response.status === 503) {
             // Cold start: no healthy task behind the ALB. Poll /health until ready.
-            assistantDiv.textContent = "Warming up the GPU and loading the model. First request after idle can take 5–8 minutes. Please wait...";
+            assistantDiv.textContent = "Warming up the GPU and loading the model. The first request can take several minutes — up to ~15 on a brand-new deployment. Please wait...";
             await retryUntilReady(text, assistantDiv);
             return;
         }
@@ -176,7 +176,10 @@ async function sendMessage() {
 
 async function retryUntilReady(text, messageDiv) {
     let attempts = 0;
-    const maxAttempts = 40;  
+    // 90 attempts x 15s = ~22 min. A brand-new deployment cold start (ASG launch +
+    // ~18 GB image pull + model load) can take ~13 min, so the window must exceed it
+    // comfortably; a warm scale-from-zero is much faster (~5 min).
+    const maxAttempts = 90;
 
     status.textContent = "Warming up...";
     status.className = "status connecting";
@@ -185,7 +188,7 @@ async function retryUntilReady(text, messageDiv) {
         attempts++;
 
         if (attempts === 1) {
-            messageDiv.textContent = "Warming up the GPU and loading the model. First request after idle can take 5–8 minutes. Please wait...";
+            messageDiv.textContent = "Warming up the GPU and loading the model. The first request can take several minutes — up to ~15 on a brand-new deployment. Please wait...";
         } else {
             const elapsedMin = Math.round(attempts * 0.25);
             messageDiv.textContent =
