@@ -1,6 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
+# AWS CLI v2 pipes any non-empty output through a pager when stdout is a terminal.
+# That turns an informational response into a blocking prompt that no amount of
+# AUTO_APPROVE can answer: `aws s3api head-bucket` used to print nothing on success,
+# but current versions return a JSON body, so the second deploy in any account — the
+# one where the state bucket already exists — stopped dead on a full-screen pager.
+# Disable paging for every AWS call here rather than redirecting them one at a time.
+export AWS_PAGER=""
+
 echo "  Gemma 4 Cloud Deployment — Deploy"
 echo ""
 
