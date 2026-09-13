@@ -711,19 +711,69 @@ resource "aws_appautoscaling_policy" "scale_in_idle" {
   }
 }
 
+// "Silence means idle" is only true once something is actually listening. The ALB
+// publishes RequestCount solely for requests it could route to a target, so during a
+// cold start — no target yet, every request answered 503 — the metric is absent, and
+// absent used to be read as breaching. The result was an alarm that sat in ALARM for
+// the whole of every cold start with a policy behind it that sets capacity to exactly
+// zero: measured at 23 minutes on the final run, killed only by the wake policy
+// repeatedly winning the race. Two scaling policies were live at once, one asking for
+// a task and the other asking for none.
+//
+// So require a healthy target before silence counts. With no target the service is
+// either already at zero, where there is nothing to scale in, or still starting, where
+// scaling in is the one thing that must not happen. FILL supplies the zeros the ALB
+// omits for both metrics, the same way the wake alarm does.
+//
+// Replayed against the final cold start this reads 0 from 22:26 to 22:51 — deploy,
+// idle at zero, and all 16 minutes of the start — then 1 at 22:52, the single minute
+// with a healthy target and no requests, then 0 again once traffic arrived.
 resource "aws_cloudwatch_metric_alarm" "scale_in_on_idle" {
   alarm_name          = "${var.project_name}-scale-in-on-idle"
-  comparison_operator = "LessThanThreshold"
+  alarm_description   = "A healthy target has served nothing for 15 minutes: the service is idle rather than starting."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 15
-  metric_name         = "RequestCount"
-  namespace           = "AWS/ApplicationELB"
-  period              = 60
-  statistic           = "Sum"
   threshold           = 1
-  treat_missing_data  = "breaching"
+  treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    LoadBalancer = var.alb_arn_suffix
+  metric_query {
+    id          = "e1"
+    expression  = "IF(FILL(m2,0) >= 1, 1, 0) * IF(FILL(m1,0) < 1, 1, 0)"
+    label       = "healthy-but-idle"
+    return_data = true
+  }
+
+  metric_query {
+    id          = "m1"
+    return_data = false
+
+    metric {
+      metric_name = "RequestCount"
+      namespace   = "AWS/ApplicationELB"
+      period      = 60
+      stat        = "Sum"
+
+      dimensions = {
+        LoadBalancer = var.alb_arn_suffix
+      }
+    }
+  }
+
+  metric_query {
+    id          = "m2"
+    return_data = false
+
+    metric {
+      metric_name = "HealthyHostCount"
+      namespace   = "AWS/ApplicationELB"
+      period      = 60
+      stat        = "Maximum"
+
+      dimensions = {
+        TargetGroup  = var.target_group_arn_suffix
+        LoadBalancer = var.alb_arn_suffix
+      }
+    }
   }
 
   alarm_actions = [aws_appautoscaling_policy.scale_in_idle.arn]
