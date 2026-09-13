@@ -578,7 +578,22 @@ resource "aws_appautoscaling_policy" "scale_out_wake" {
     // "set capacity to exactly 1" would answer that by stopping every task but one —
     // scaling in during a spike. +1 can only add, and max_capacity still caps it.
     adjustment_type = "ChangeInCapacity"
-    cooldown        = 60
+
+    // 300 rather than 60. ECS Service Auto Scaling calculates from the RUNNING task
+    // count, not the desired count, so while the first task is still pulling the image
+    // every repeated invocation recomputes 1 and changes nothing. The moment that task
+    // reaches RUNNING the calculation yields 2 — and the ALB target is not healthy yet,
+    // so this alarm is still in ALARM and a duplicate task gets created. Measured on a
+    // real cold start: task RUNNING at 16:41:45, second task requested at 16:43:48.
+    // An identical +1 is suppressed for the duration of the cooldown, which covers the
+    // RUNNING-to-healthy gap (two health checks 30 s apart, plus registration).
+    //
+    // Safe against the one case AWS leaves undocumented — what a scale-in does to an
+    // active scale-out cooldown — because scale_in_on_idle needs 15 consecutive quiet
+    // minutes before it can fire, so this cooldown has always expired long before any
+    // scale-in happens. It also cannot delay a wake: a cooldown only follows a scaling
+    // activity, and after a scale-in to zero the last one is at least 15 minutes old.
+    cooldown = 300
 
     step_adjustment {
       metric_interval_lower_bound = 0
