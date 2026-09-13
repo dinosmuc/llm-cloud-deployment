@@ -156,13 +156,18 @@ The same script runs in GitHub Actions on every push and pull request (`.github/
 
 ```bash
 ./scripts/destroy.sh                    # AUTO_APPROVE=1 to skip the prompt
+PURGE_STATE=1 ./scripts/destroy.sh      # also delete the Terraform state bucket
 ```
 
 `destroy.sh` re-creates `backend.hcl` if it is missing, so it works from a fresh clone
 too — but it still needs `terraform/terraform.tfvars`, because Terraform requires values
 for the variables that have no default before it can build a destroy plan.
 
-If `destroy` times out while the ECS service drains, just run it again. The state bucket is created outside the stack and is left alone — delete it manually if you no longer need it.
+It is one command, and it checks its own work:
+
+1. **Destroy, retried once.** If `terraform destroy` fails — typically a timeout while the ECS service drains — the script says so, waits 60 seconds and tries exactly once more. A second failure exits non-zero and leaves the state bucket untouched; fix the cause and run it again. It never retries more than once: a destroy that keeps failing needs a person, not a loop.
+2. **Leftover check.** It then asks the Resource Groups Tagging API for anything in the region whose `Name` tag starts with `<project_name>-`, and prints either *nothing left* or the ARNs that survived. Treat it as a smoke test, not a guarantee: resources without a `Name` tag are invisible to it, and global ones such as the CloudFront distribution may not appear in a regional query. ECS task definition revisions are counted separately — Terraform can only deregister them, ECS keeps them as `INACTIVE`, and they cost nothing. If your credentials lack `tag:GetResources`, the result is reported as unknown and the teardown carries on.
+3. **State bucket.** Kept by default, and the script prints the command to remove it. `deploy.sh` creates it outside the stack, because a backend cannot create itself, so `terraform destroy` never sees it. It holds the versioned history of the state file, costs next to nothing, and the next deploy reuses it. With `PURGE_STATE=1` the script deletes every object version and delete marker first — the bucket is versioned, so `aws s3 rb --force` alone would fail — and then the bucket itself. Running the script again after a purge is not an error: with no state bucket there is no Terraform state to destroy from, so it skips `terraform destroy` and still runs the leftover check.
 
 ## Cost
 
