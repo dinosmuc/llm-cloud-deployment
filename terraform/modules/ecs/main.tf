@@ -537,6 +537,18 @@ resource "aws_ecs_service" "main" {
 
   depends_on = [aws_ecs_cluster_capacity_providers.main]
 
+  // The provider waits 20 minutes by default for a deleted service to reach INACTIVE,
+  // and this one does not make it. Measured on a real teardown: every task had already
+  // stopped, yet the service sat in DRAINING for about 26 minutes, so the first
+  // terraform destroy failed on "timeout while waiting for state to become 'INACTIVE'"
+  // and only the script's retry finished the job. Nothing was wrong — the drain is
+  // simply slower than the default allows, so give it room rather than relying on a
+  // second pass. A timeout only bounds how long Terraform waits; it cannot itself
+  // cause a failure.
+  timeouts {
+    delete = "40m"
+  }
+
   lifecycle {
     ignore_changes = [desired_count]
   }
