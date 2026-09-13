@@ -245,8 +245,19 @@ resource "aws_autoscaling_group" "ecs" {
   name                = "${var.project_name}-asg"
   vpc_zone_identifier = var.private_subnet_ids
   min_size            = 0
-  max_size            = var.max_capacity
-  desired_capacity    = 0
+
+  // Deliberately the task ceiling, not the GPU quota: one task requests one whole GPU
+  // and a g6.xlarge has one, so the two ceilings are the same number by construction.
+  //
+  // Known transient: waking from zero can briefly launch two instances for one task.
+  // ECS publishes CapacityProviderReservation as a flat 200 whenever the group is empty
+  // and a task needs placing — it cannot form a ratio against zero — and 200 is twice
+  // target_capacity, so target tracking doubles from nothing. The spare carries no task
+  // and ECS drains it once managed termination protection lifts. Clamping max_size to 1
+  // would remove the transient at the cost of making scale-out unreachable; on an
+  // account whose G-instance quota is 4 vCPU the third instance simply fails to launch.
+  max_size         = var.max_capacity
+  desired_capacity = 0
 
   launch_template {
     id      = aws_launch_template.ecs.id
@@ -254,6 +265,19 @@ resource "aws_autoscaling_group" "ecs" {
   }
 
   protect_from_scale_in = true
+
+  // Without this the group publishes no metrics, so nothing in CloudWatch records how
+  // many GPU instances exist — the dashboard's HealthyHostCount counts ALB targets, and
+  // an instance whose task is still pulling the image is not one. Free, and it is what
+  // makes an over-provisioned group visible instead of something to reconstruct from
+  // the scaling-activity log after the fact.
+  metrics_granularity = "1Minute"
+  enabled_metrics = [
+    "GroupDesiredCapacity",
+    "GroupInServiceInstances",
+    "GroupPendingInstances",
+    "GroupTerminatingInstances",
+  ]
 
   tag {
     key                 = "Name"
@@ -296,6 +320,14 @@ resource "aws_ecs_capacity_provider" "main" {
       minimum_scaling_step_size = 1
       status                    = "ENABLED"
       target_capacity           = 100
+
+      // Without this the field defaults to 0, and ECS re-evaluates capacity the moment
+      // after it launches an instance — before that instance has booted, joined the
+      // cluster and had its GPU counted. It therefore sees the same unmet demand twice
+      // and scales again: an observed cold start went 0 -> 2 instances at 14:26:50 and
+      // 2 -> 3 at 14:27:50, 45 seconds later, for a single pending task. A g6.xlarge
+      // needs several minutes to register, so hold the next evaluation until then.
+      instance_warmup_period = 300
     }
   }
 
@@ -494,8 +526,14 @@ resource "aws_ecs_service" "main" {
 
   health_check_grace_period_seconds = 300
 
+  // A task reserves a whole GPU and a g6.xlarge has exactly one, so two tasks can never
+  // share an instance. At 200 percent ECS is allowed to start the replacement task before
+  // stopping the old one during a rollout, which it can only do on a SECOND GPU instance —
+  // and because force_new_deployment above makes every terraform apply a rollout, a warm
+  // service asked the capacity provider for an extra g6.xlarge on every single apply.
+  // 100 percent stops the old task first, which is the only order the hardware allows.
   deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 200
+  deployment_maximum_percent         = 100
 
   depends_on = [aws_ecs_cluster_capacity_providers.main]
 
@@ -549,19 +587,70 @@ resource "aws_appautoscaling_policy" "scale_out_wake" {
   }
 }
 
+// A 503 alone is not the signal this policy wants. The service emits 503s for the
+// whole cold start, and the browser's own /health poll (every 15 s, so four requests
+// a minute) keeps producing them for the ~18 minutes the model takes to load. Each
+// time the alarm re-entered ALARM it added another task: an observed cold start went
+// to desired_count 2 for one user sending one message, and the second task pulled the
+// ~18 GB image onto a second GPU instance that was never needed.
+//
+// The condition the policy actually means is "there is no capacity at all", which is
+// a 503 AND no healthy target. HealthyHostCount cannot be used on its own: the ALB
+// publishes nothing for it while the target group is empty — verified over a real
+// 22-minute zero-target window, where the metric had a single datapoint, at the
+// moment the first task registered. That is the same missing-metric trap that made
+// CPU target tracking unusable here. FILL(m2,0) supplies the zero the ALB does not,
+// and FILL(m1,0) does the same for the 503 count, which is only reported when nonzero.
+//
+// Replayed against the incident above, this expression reads 1 from 16:21 to 16:40
+// and 0 from 16:41, the minute the first task became healthy — so the 16:43 scale-out
+// that created the second task would not have fired.
 resource "aws_cloudwatch_metric_alarm" "wake_on_503" {
   alarm_name          = "${var.project_name}-wake-on-503"
+  alarm_description   = "No healthy target and the ALB is answering 503: the service is at zero and cannot serve."
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = 1
-  metric_name         = "HTTPCode_ELB_503_Count"
-  namespace           = "AWS/ApplicationELB"
-  period              = 60
-  statistic           = "Sum"
   threshold           = 1
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    LoadBalancer = var.alb_arn_suffix
+  metric_query {
+    id          = "e1"
+    expression  = "IF(FILL(m2,0) < 1, 1, 0) * IF(FILL(m1,0) >= 1, 1, 0)"
+    label       = "no-capacity-at-all"
+    return_data = true
+  }
+
+  metric_query {
+    id          = "m1"
+    return_data = false
+
+    metric {
+      metric_name = "HTTPCode_ELB_503_Count"
+      namespace   = "AWS/ApplicationELB"
+      period      = 60
+      stat        = "Sum"
+
+      dimensions = {
+        LoadBalancer = var.alb_arn_suffix
+      }
+    }
+  }
+
+  metric_query {
+    id          = "m2"
+    return_data = false
+
+    metric {
+      metric_name = "HealthyHostCount"
+      namespace   = "AWS/ApplicationELB"
+      period      = 60
+      stat        = "Maximum"
+
+      dimensions = {
+        TargetGroup  = var.target_group_arn_suffix
+        LoadBalancer = var.alb_arn_suffix
+      }
+    }
   }
 
   alarm_actions = [aws_appautoscaling_policy.scale_out_wake.arn]
