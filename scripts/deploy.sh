@@ -155,7 +155,7 @@ EOF
 cd "${REPO_ROOT}/terraform"
 
 echo "→ Initialising Terraform..."
-terraform init -backend-config=backend.hcl
+terraform init -reconfigure -backend-config=backend.hcl
 echo ""
 
 # Step 1: ECR must exist before images can be pushed. A plain full apply would

@@ -75,7 +75,7 @@ EOF
 fi
 
 echo "→ Initialising Terraform against the state bucket..."
-terraform init -backend-config=backend.hcl
+terraform init -reconfigure -backend-config=backend.hcl
 echo ""
 
 echo "→ Destroying infrastructure..."
