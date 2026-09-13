@@ -29,6 +29,6 @@ variable "target_group_arn_suffix" {
 }
 
 variable "alert_email" {
-  description = "Email address subscribed to the alerts SNS topic"
+  description = "Email address subscribed to the alerts SNS topic. Empty creates no subscription; the topic and the alarms are created either way."
   type        = string
 }

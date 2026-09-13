@@ -107,7 +107,12 @@ resource "aws_sns_topic" "alerts" {
   name = "${var.project_name}-alerts"
 }
 
+// The only optional piece of the monitoring stack. An empty alert_email means the
+// operator does not want email; the topic above and every alarm below are still
+// created, so a subscription can be added by hand or by setting alert_email later.
 resource "aws_sns_topic_subscription" "email" {
+  count = var.alert_email == "" ? 0 : 1
+
   topic_arn = aws_sns_topic.alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email

@@ -1,4 +1,14 @@
-# Copy this file to terraform.tfvars and fill in your values
+# Optional. ./scripts/deploy.sh generates terraform/terraform.tfvars with two random
+# API keys when the file does not exist, so a clean clone needs nothing from here.
+#
+# Copy it only if you want to pin the values yourself:
+#   cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+# Then replace both placeholder keys below — variables.tf refuses to deploy them as
+# they are — with two different secrets: openssl rand -base64 24
+#
+# alert_email may be left empty (""), which turns off the alarm emails. The CloudWatch
+# alarms and the SNS topic are created either way; only the email subscription is
+# skipped, so an address can be subscribed later without changing the stack.
 aws_region       = "eu-central-1"
 project_name     = "gemma-inference"
 instance_type    = "g6.xlarge"

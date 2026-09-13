@@ -90,11 +90,14 @@ variable "system_prompt" {
 }
 
 variable "alert_email" {
-  description = "Email address that receives CloudWatch alarm notifications (high latency, high error rate, no healthy targets). The address must confirm the SNS subscription via the AWS confirmation email before notifications begin to flow."
+  description = "Email address that receives CloudWatch alarm notifications (high latency, high error rate, no healthy targets). The address must confirm the SNS subscription via the AWS confirmation email before notifications begin to flow. Empty disables email delivery only: the alarms and the SNS topic are still created, so a subscription can be added later without touching the stack."
   type        = string
+  default     = ""
 
   validation {
-    condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.alert_email))
-    error_message = "alert_email must be a valid email address; SNS silently never delivers to a malformed one."
+    // Empty is the deliberate opt-out, so it skips the format check. Anything else
+    // still has to look like an address.
+    condition     = var.alert_email == "" || can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.alert_email))
+    error_message = "alert_email must be a valid email address, or empty to disable email notifications; SNS silently never delivers to a malformed one."
   }
 }

@@ -41,6 +41,7 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 | Docker | 29.5.3 | 23.0 | building the images (needs BuildKit/Buildx) |
 | Python | 3.14 (image) / 3.11 (local tests) | 3.11 | proxy + tests |
 | Node.js | 24 | 22 | frontend tests only |
+| OpenSSL | 3.x | any | generating the API keys on the first deploy |
 
 **AWS account**
 
@@ -63,12 +64,37 @@ From a clean clone, in any AWS account:
 git clone https://github.com/dinosmuc/llm-cloud-deployment.git
 cd llm-cloud-deployment
 
-cp terraform/terraform.tfvars.example terraform/terraform.tfvars
-# set public_api_key, internal_api_key (must differ) and alert_email
-
 export HF_TOKEN=hf_...
 ./scripts/deploy.sh
 ```
+
+There is no configuration step. `deploy.sh` generates `terraform/terraform.tfvars` on
+the first run — two different API keys from `openssl rand -base64 24`, defaults for
+everything else — and writes it with mode `600`. It is generated **only when the file
+is absent**: the keys live in SSM, so rewriting them on every run would redeploy the
+service for no reason.
+
+To pin the values yourself, create the file before deploying and it is left untouched:
+
+```bash
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars   # then edit it
+```
+
+Or set any of these before the first run — they are read only while generating:
+
+| Variable | Default | |
+|---|---|---|
+| `ALERT_EMAIL` | *(empty)* | Address for CloudWatch alarm emails. Empty disables the emails; the alarms and the SNS topic are created either way, so an address can be subscribed later. |
+| `AWS_REGION` | `eu-central-1` | Region to deploy into. |
+| `PROJECT_NAME` | `gemma-inference` | Prefix for every resource name, and for the state bucket. |
+| `INSTANCE_TYPE` | `g6.xlarge` | GPU instance type. Gemma 4 attention needs L4-class, not T4. |
+
+```bash
+ALERT_EMAIL=you@example.com AWS_REGION=us-east-1 ./scripts/deploy.sh
+```
+
+Deleting `terraform.tfvars` makes the next deploy generate fresh keys, which rewrites
+the SSM parameters and redeploys the service.
 
 `deploy.sh` prompts twice before it changes anything. To run it unattended — in CI, from
 a cron job, or just piped — set `AUTO_APPROVE=1`, which answers both prompts:
@@ -79,7 +105,7 @@ AUTO_APPROVE=1 ./scripts/deploy.sh      # and likewise for ./scripts/destroy.sh
 
 `deploy.sh` does everything, in the order that matters:
 
-1. **Preflight** — checks the tools (including `docker buildx`, which the image build requires), credentials, Docker daemon, `HF_TOKEN` and `terraform.tfvars`, and fails early with a clear message if anything is missing. It also warns when the account's GPU vCPU quota is below 4, the most common reason the stack applies cleanly and then never launches an instance.
+1. **Preflight** — checks the tools (including `docker buildx`, which the image build requires), credentials, Docker daemon and `HF_TOKEN`, generates `terraform.tfvars` if there is none, and fails early with a clear message if anything is missing. It also warns when the account's GPU vCPU quota is below 4, the most common reason the stack applies cleanly and then never launches an instance.
 2. **State backend** — Terraform cannot create its own backend, so the script creates an S3 bucket named `<project_name>-tfstate-<your-account-id>` (versioned, encrypted, public access blocked), writes `terraform/backend.hcl`, and runs `terraform init -backend-config=backend.hcl`. The account ID keeps the globally-unique bucket name collision-free, which is why nothing is hardcoded. Re-runs reuse the existing bucket.
 3. **ECR first** — the repository has to exist before images can be pushed, so it is applied on its own with `-target=module.ecr`.
 4. **Build and push** — the repository URL is read back with `terraform output -raw ecr_repository_url` and passed to `build_and_push.sh`, so the build can never target a different repo or region than the one ECS reads from. The vLLM image bakes in the model weights and takes 10–15 min the first time.
@@ -122,7 +148,7 @@ Runs without AWS credentials, deployment or Docker (a fresh `terraform init` doe
 - shell syntax (`bash -n`) and Python syntax
 - **proxy tests** — a missing, wrong or unconfigured `x-api-key` is rejected with 401; a valid one is swapped for the internal Bearer token and the streamed response passes through byte-for-byte
 - **frontend test** — an SSE event split across network chunks is reassembled, checked at every possible split point
-- **config tests** — the checks a clean clone depends on: `terraform.tfvars.example` declares every variable that has no default, its placeholder keys are the ones `variables.tf` refuses to deploy, `app.js` and the module that renders it agree on the template variables and pass them through `jsonencode`, `deploy.sh`'s own tfvars parser reads the example correctly, and both scripts support `AUTO_APPROVE`
+- **config tests** — the checks a clean clone depends on: `terraform.tfvars.example` declares every variable that has no default, its placeholder keys are the ones `variables.tf` refuses to deploy, `app.js` and the module that renders it agree on the template variables and pass them through `jsonencode`, `deploy.sh`'s own tfvars parser reads the example correctly, and both scripts support `AUTO_APPROVE`. They also run `deploy.sh`'s generation branch for real and check what it wrote: mode `600`, every variable Terraform requires, two different keys that its own validation accepts, valid `fmt`-clean HCL, the four environment overrides, and that a second run leaves an existing file byte-for-byte alone
 
 The same script runs in GitHub Actions on every push and pull request (`.github/workflows/ci.yml`). CI never touches AWS and needs no secrets.
 
@@ -160,7 +186,7 @@ The GPU (~$0.98/hour for `g6.xlarge`) runs only while serving. Tear the stack do
 | `VcpuLimitExceeded` / instance never launches | GPU quota not granted. Request **Running On-Demand G and VT instances** ≥ 4 vCPU in Service Quotas. |
 | Image build fails downloading the model | `HF_TOKEN` not exported, or Google's licence not accepted on the model page. |
 | `denied: Your authorization token has expired` on push | ECR login expires after 12 h. Re-run `./scripts/deploy.sh`, or re-authenticate manually with `aws ecr get-login-password`. |
-| No alarm emails | The SNS subscription must be confirmed from the AWS email sent to `alert_email`. Until then nothing is delivered. |
+| No alarm emails | Either `alert_email` is empty, which creates no subscription at all, or the subscription has not been confirmed from the AWS email sent to that address. The alarms themselves fire either way — check them in CloudWatch. |
 | UI sits on "Still warming up" | Normal for a cold start. It retries for ~22 min. Beyond that, check the ECS service events and the `/ecs/<project>/vllm` log group. |
 | `terraform init` asks for a bucket | You ran it without the backend config. Use `terraform init -backend-config=backend.hcl`, or just run `./scripts/deploy.sh`. |
 
