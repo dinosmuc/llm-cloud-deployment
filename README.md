@@ -25,13 +25,7 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 
 ## Prerequisites
 
-The automation is four Bash scripts, so it needs a POSIX shell.
-
-| OS | |
-|---|---|
-| Linux | Native. Developed and measured on it. |
-| macOS | Native. No GNU-only flags or Bash 4 syntax, so stock `/bin/bash` 3.2 works. Your interactive shell can be zsh. |
-| Windows | Use **WSL2**, inside the Linux filesystem. Git Bash does not enforce POSIX file modes, so the test asserting `terraform.tfvars` is mode `600` fails there; `cmd.exe` and PowerShell cannot run the scripts. |
+The automation is four Bash scripts. It runs natively on **Linux** and **macOS** — no GNU-only flags or Bash 4 syntax, so macOS's stock `/bin/bash` is fine, and your interactive shell can be zsh. On **Windows** it needs **WSL2**; run everything inside the Linux filesystem.
 
 | Tool | Tested | Minimum | Needed for |
 |---|---|---|---|
