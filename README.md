@@ -32,6 +32,14 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 
 ## Prerequisites
 
+**Platform** — the automation is four Bash scripts, so it needs a POSIX shell.
+
+| OS | How to run it |
+|---|---|
+| Linux | Natively. This is what the project was developed and measured on. |
+| macOS | Natively. The scripts avoid GNU-only flags and Bash 4 syntax, so the stock `/bin/bash` (3.2) is fine. Your interactive shell can be zsh — the scripts declare their own interpreter. |
+| Windows | Use **WSL2** and run everything inside the Linux filesystem. Git Bash mostly works but does not enforce POSIX file modes, so the config test that asserts `terraform.tfvars` is mode `600` will fail; `cmd.exe` and PowerShell cannot run the scripts at all. |
+
 **Tools** — these are the versions the project was last built and tested with; the minimums are what it actually requires.
 
 | Tool | Tested | Minimum | Needed for |
@@ -108,7 +116,7 @@ AUTO_APPROVE=1 ./scripts/deploy.sh      # and likewise for ./scripts/destroy.sh
 1. **Preflight** — checks the tools (including `docker buildx`, which the image build requires), credentials, Docker daemon and `HF_TOKEN`, generates `terraform.tfvars` if there is none, and fails early with a clear message if anything is missing. It also warns when the account's GPU vCPU quota is below 4, the most common reason the stack applies cleanly and then never launches an instance.
 2. **State backend** — Terraform cannot create its own backend, so the script creates an S3 bucket named `<project_name>-tfstate-<your-account-id>` (versioned, encrypted, public access blocked), writes `terraform/backend.hcl`, and runs `terraform init -backend-config=backend.hcl`. The account ID keeps the globally-unique bucket name collision-free, which is why nothing is hardcoded. Re-runs reuse the existing bucket.
 3. **ECR first** — the repository has to exist before images can be pushed, so it is applied on its own with `-target=module.ecr`.
-4. **Build and push** — the repository URL is read back with `terraform output -raw ecr_repository_url` and passed to `build_and_push.sh`, so the build can never target a different repo or region than the one ECS reads from. The vLLM image bakes in the model weights and takes 10–15 min the first time.
+4. **Build and push** — the repository URL is read back with `terraform output -raw ecr_repository_url` and passed to `build_and_push.sh`, so the build can never target a different repo or region than the one ECS reads from. The vLLM image bakes in the model weights; building and pushing it took about 20 min in the measured run.
 5. **Apply the rest** — shows a plan, then applies on confirmation.
 
 To run Terraform by hand afterwards, point it at the generated backend config:
@@ -129,7 +137,7 @@ terraform output -raw public_api_key    # -raw is required; the value is marked 
 
 Open `frontend_url`, paste the key, and chat.
 
-The **first request after idle** triggers a cold start (~5 min when warm, up to ~15 min on a brand-new deploy) while the GPU launches and vLLM loads the model — the UI shows progress and resends automatically. After that, responses stream sub-second to first token.
+The **first request after idle** triggers a cold start (~5 min when warm; **16 min 41 s** on a brand-new deploy in the measured run, of which 13 min 24 s was pulling the 18 GB image) while the GPU launches and vLLM loads the model — the UI shows progress and resends automatically. After that, responses stream sub-second to first token.
 
 ## Checks
 
@@ -165,7 +173,7 @@ for the variables that have no default before it can build a destroy plan.
 
 It is one command, and it checks its own work:
 
-1. **Destroy, retried once.** If `terraform destroy` fails — typically a timeout while the ECS service drains — the script says so, waits 60 seconds and tries exactly once more. A second failure exits non-zero and leaves the state bucket untouched; fix the cause and run it again. It never retries more than once: a destroy that keeps failing needs a person, not a loop.
+1. **Destroy, retried once.** If `terraform destroy` fails — typically a timeout while the ECS service drains — the script says so, waits 60 seconds and tries exactly once more. This is not hypothetical: in the measured teardown the service sat in `DRAINING` for about 26 min with every task already stopped, exceeding Terraform's 20-minute delete timeout, and the retry finished the job. The service now declares a 40-minute delete timeout so the first pass should succeed. A second failure exits non-zero and leaves the state bucket untouched; fix the cause and run it again. It never retries more than once: a destroy that keeps failing needs a person, not a loop.
 2. **Leftover check.** It then asks the Resource Groups Tagging API for anything in the region whose `Name` tag starts with `<project_name>-`, and prints either *nothing left* or the ARNs that survived. Treat it as a smoke test, not a guarantee: resources without a `Name` tag are invisible to it, and global ones such as the CloudFront distribution may not appear in a regional query. ECS task definition revisions are counted separately — Terraform can only deregister them, ECS keeps them as `INACTIVE`, and they cost nothing. If your credentials lack `tag:GetResources`, the result is reported as unknown and the teardown carries on.
 3. **State bucket.** Kept by default, and the script prints the command to remove it. `deploy.sh` creates it outside the stack, because a backend cannot create itself, so `terraform destroy` never sees it. It holds the versioned history of the state file, costs next to nothing, and the next deploy reuses it. With `PURGE_STATE=1` the script deletes every object version and delete marker first — the bucket is versioned, so `aws s3 rb --force` alone would fail — and then the bucket itself. Running the script again after a purge is not an error: with no state bucket there is no Terraform state to destroy from, so it skips `terraform destroy` and still runs the leftover check.
 

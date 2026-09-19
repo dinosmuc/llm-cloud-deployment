@@ -1,0 +1,7 @@
+# Git for Windows defaults to core.autocrlf=true, which rewrites text files to
+# CRLF on checkout. A shell script with CRLF endings fails immediately with
+# "bad interpreter: /bin/bash^M" — before a single line runs — so pin LF for
+# everything and let Git detect binaries.
+* text=auto eol=lf
+
+*.png binary
