@@ -187,26 +187,39 @@ resource "aws_route_table_association" "private_2" {
 // SECURITY GROUPS
 
 
-// ALB Security Group — allows internet traffic on 80 and 443
+// CloudFront's origin-facing address ranges, maintained by AWS.
+data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+// ALB Security Group — reachable only from CloudFront
+//
+// This was 0.0.0.0/0 on 80 and 443, and that is not a theoretical exposure: four
+// minutes after the load balancer went live, an unauthenticated GET / from an
+// external scanner reached it, was answered 503 because the service was scaled to
+// zero, and tripped the wake alarm. A stranger launched GPU instances in the
+// account. Scale-to-zero turns an open origin into a remotely triggerable way to
+// spend money, so the origin is no longer open.
+//
+// A managed prefix list consumes its MaxEntries against the 60-rules-per-group
+// quota, which is why only port 80 is listed: the load balancer has an HTTP
+// listener and nothing else, so the old 443 rule admitted traffic that had
+// nowhere to go. Two prefix-list rules would exceed the quota.
+//
+// This stops anything that is not CloudFront. It does not distinguish THIS
+// distribution from someone else's — that needs a secret header injected by
+// CloudFront and verified by the WAF, which is recorded as future work.
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb-sg"
-  description = "Allow HTTP and HTTPS from internet"
+  description = "Allow HTTP from CloudFront origin-facing ranges only"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description = "HTTP from internet"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTPS from internet"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "HTTP from CloudFront only"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront_origin.id]
   }
 
   egress {
