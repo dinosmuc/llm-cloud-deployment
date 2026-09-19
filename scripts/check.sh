@@ -33,7 +33,16 @@ echo "→ Proxy tests..."
 python3 -m pytest tests -q
 
 echo "→ Frontend tests..."
-node --test "tests/**/*.test.js"
+# Node is needed for these four SSE tests and nothing else in the project: the
+# frontend is plain HTML/JS with no build step. Skip rather than fail when it is
+# absent, so a reviewer without Node still gets the Terraform, shell, Python and
+# proxy checks instead of a hard stop at the last step.
+if command -v node >/dev/null 2>&1; then
+    node --test "tests/**/*.test.js"
+else
+    echo "  SKIPPED: node not found. The 4 SSE tests need Node >= 22;"
+    echo "  the other 24 tests above have run. Install Node for the full suite."
+fi
 
 echo ""
 echo "  All checks passed."

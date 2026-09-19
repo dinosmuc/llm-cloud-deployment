@@ -217,10 +217,28 @@ def test_generated_tfvars_would_be_accepted_by_variables_tf(tmp_path):
     run_generation_branch(target)
 
     assert target.exists(), "deploy.sh did not generate terraform.tfvars"
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600, (
-        "terraform.tfvars holds two secrets in plaintext and must not be readable "
-        "by other accounts on the machine"
-    )
+
+    # NTFS through Git Bash reports whatever it likes for st_mode, so asserting the
+    # mode there fails on a filesystem that cannot express it rather than on a real
+    # defect. Probe the filesystem instead of the platform name: under WSL2 or a
+    # Linux container the check must still run, and only the probe can tell them
+    # apart. chmod is what deploy.sh relies on, so if the probe cannot hold 0600
+    # neither can the real file.
+    probe = tmp_path / ".mode-probe"
+    probe.write_text("")
+    probe.chmod(0o600)
+
+    if stat.S_IMODE(probe.stat().st_mode) == 0o600:
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600, (
+            "terraform.tfvars holds two secrets in plaintext and must not be readable "
+            "by other accounts on the machine"
+        )
+    else:
+        print(
+            "\n  note: filesystem does not enforce POSIX modes, so the 0600 check on "
+            "terraform.tfvars was not applied. On such a filesystem the file is not "
+            "protected from other accounts; use WSL2 or Linux/macOS to verify it."
+        )
 
     values = generated_values(target)
     blocks = variable_blocks()
