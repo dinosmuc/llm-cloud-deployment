@@ -21,7 +21,7 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 | Observability | CloudWatch dashboard + alarms · SNS email |
 | CI | GitHub Actions — format, validate, unit tests (no AWS access) |
 
-**Multi-AZ** VPC, NAT per AZ, ALB and ASG across both — see [Limitations](#limitations) for the availability caveat. **Scale-to-zero**: no GPU when idle, wakes on the first request, back to zero after 15 idle minutes. **Secure**: private subnets, WAF rate limiting, dual-key auth, SSM SecureString, Hugging Face token via BuildKit secret, S3 reachable only through CloudFront OAC.
+**Multi-AZ** VPC, NAT per AZ, ALB and ASG across both — see [Limitations](#limitations) for the availability caveat. **Scale-to-zero**: no GPU when idle, wakes on the first request, back to zero after 15 idle minutes. **Secure**: private subnets, ALB reachable only from CloudFront's origin ranges, WAF rate limiting, dual-key auth, SSM SecureString, Hugging Face token via BuildKit secret, S3 reachable only through CloudFront OAC.
 
 ## Prerequisites
 
@@ -66,7 +66,7 @@ The script prompts twice; `AUTO_APPROVE=1` answers both (same for `destroy.sh`).
 1. **Preflight** — tools, credentials, Docker daemon, `buildx`, `HF_TOKEN`; generates `terraform.tfvars`; warns if the GPU vCPU quota is below 4.
 2. **State backend** — creates `<project_name>-tfstate-<account-id>` (versioned, encrypted, private), writes `backend.hcl`, runs `terraform init`. The account ID keeps the name collision-free, which is why nothing is hardcoded. Re-runs reuse it.
 3. **ECR first** — applied alone with `-target=module.ecr`, so images have somewhere to go.
-4. **Build and push** — repository URL read back from Terraform, so the build cannot target the wrong repo. The image bakes in the weights: **~20 min** in the measured run.
+4. **Build and push** — repository URL read back from Terraform, so the build cannot target the wrong repo. The image bakes in the weights, so this step is dominated by uploading 18 GB: **20-31 min** measured, depending on upload bandwidth.
 5. **Apply the rest** — plan, confirm, apply.
 
 To run Terraform by hand afterwards: `terraform init -backend-config=backend.hcl`.
@@ -81,7 +81,7 @@ terraform output -raw public_api_key    # -raw required; value is sensitive
 
 Open the URL, paste the key, chat.
 
-The first request after idle triggers a cold start — **16 min 41 s** on a brand-new deploy in the measured run, of which 13 min 24 s was pulling the 18 GB image; ~5 min when warm. The UI shows progress and resends automatically. After that, sub-second to first token.
+The first request after idle triggers a cold start — **17 min 14 s** on a brand-new deploy in the final measured run, of which 13 min 25 s was pulling the 18 GB image; ~5 min when warm. The UI shows progress and resends automatically. After that, sub-second to first token.
 
 ## Checks
 
@@ -111,7 +111,7 @@ PURGE_STATE=1 ./scripts/destroy.sh      # also delete the state bucket
 
 Works from a fresh clone — it rebuilds `backend.hcl` if missing — but it still needs `terraform/terraform.tfvars`, since Terraform wants values for variables without defaults even to plan a destroy.
 
-**Destroy, retried once.** If `terraform destroy` times out — typically while the ECS service drains — it waits 60 seconds and tries exactly once more. Not hypothetical: in the measured teardown the service sat in `DRAINING` for ~26 min with every task already stopped, past Terraform's 20-minute delete timeout, and the retry finished it. The service now declares a 40-minute timeout, so the first pass should succeed. A second failure exits non-zero and leaves the state bucket alone.
+**Destroy, retried once.** If `terraform destroy` times out — typically while the ECS service drains — it waits 60 seconds and tries exactly once more. Not hypothetical: in the measured teardown the service sat in `DRAINING` for ~26 min with every task already stopped, past Terraform's 20-minute delete timeout, and the retry finished it. The service now declares a 40-minute timeout, and the final teardown completed in one pass without a retry: 51 min end to end, of which ~41 min was draining. That margin is thin, which is why the retry stays. A second failure exits non-zero and leaves the state bucket alone.
 
 **Leftover check.** Queries the Resource Groups Tagging API for anything tagged `Name=<project_name>-*` in the region. A smoke test, not a guarantee: untagged resources are invisible to it, global ones like CloudFront may not appear, and ECS task definition revisions are counted separately because ECS only ever marks them `INACTIVE`. Without `tag:GetResources` the result is reported as unknown.
 
@@ -145,10 +145,10 @@ Plus ~$1.80/month for ECR storage of the 18 GB image. The GPU (~$0.98/hour) runs
 
 - **Availability is partial.** Infrastructure spans two AZs; inference does not. One GPU task, scaled to zero, so the service is unavailable during a cold start. Continuous availability means `min_capacity = 1` and an always-on GPU.
 - **TLS terminates at the edge.** CloudFront → ALB is plain HTTP. End-to-end TLS needs a custom domain and ACM certificate.
-- **The ALB is publicly reachable**, so the API can be called directly, bypassing CloudFront. A direct request carries no `X-Forwarded-For`, and WAF skips a forwarded-IP rule when the header is absent, so it is not rate-limited either. An answer still needs a valid key, but a direct 503 can trigger an unauthenticated scale-up. Closing this needs origin verification.
+- **Origin verification is incomplete.** The ALB was originally open to the internet, and during testing an unauthenticated `GET /` from an external scanner reached it within two minutes of it going live, was answered 503 because the service was at zero, and launched two GPU instances. The security group now admits only CloudFront's published origin-facing ranges, verified by a direct request timing out while the CloudFront route returned 200. It still cannot distinguish this distribution from another CloudFront customer's — that needs a secret origin header checked by WAF, and is future work.
 - **Rate limiting is best-effort.** WAF aggregates on the first `X-Forwarded-For` address, which a caller can influence.
 - **Scale-out is effectively inert.** The target-tracking policy aims at 600 requests per target per minute — ~300× the peak observed in testing. Streaming inference saturates far below that, and the latency alarm is no backstop: `TargetResponseTime` measures only time to the first response header (87 ms for replies taking many seconds). A useful signal would be in-flight concurrency or vLLM queue depth. An honest threshold needs load testing this project has not done.
-- **Waking from zero launches two instances.** ECS managed scaling always scales out to two initially when no container instances are running. Only one receives the task; the spare is drained about 15 minutes later.
+- **Waking from zero launches two instances.** ECS managed scaling always scales out to two initially when no container instances are running. Only one receives the task; the spare carries no task and was terminated after 18 minutes in the final run.
 - **Scale-in is all-or-nothing** — capacity returns only to zero, after 15 consecutive minutes without ALB requests. No graduated 3 → 2 → 1.
 - **Cold start** is inherent to GPU scale-to-zero, the trade for not paying ~$0.98/hour to idle.
 - **Single-turn chat.** The UI sends the system prompt plus the current message; no history.
