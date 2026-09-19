@@ -96,6 +96,31 @@ resource "aws_cloudwatch_dashboard" "main" {
           region  = var.aws_region
           view    = "singleValue"
         }
+      },
+      // Healthy targets counts ALB targets, not machines: an instance whose task is
+      // still pulling an 18 GB image is not one, so a cold start that ran two GPUs
+      // showed a healthy-target count of one and the over-provisioning was invisible
+      // here. It had to be reconstructed from the scaling-activity log afterwards.
+      // The Auto Scaling group publishes these only because enabled_metrics is set on
+      // it in the ecs module; without that they do not exist at all.
+      {
+        type   = "metric"
+        x      = 0
+        y      = 18
+        width  = 12
+        height = 6
+        properties = {
+          title = "GPU Instances (ASG)"
+          metrics = [
+            ["AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${var.project_name}-asg", { label = "In service" }],
+            ["AWS/AutoScaling", "GroupDesiredCapacity", "AutoScalingGroupName", "${var.project_name}-asg", { label = "Desired" }]
+          ]
+          period = 60
+          stat   = "Maximum"
+          region = var.aws_region
+          view   = "timeSeries"
+          yAxis  = { left = { min = 0 } }
+        }
       }
     ]
   })
