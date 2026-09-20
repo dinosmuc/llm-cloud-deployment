@@ -119,16 +119,18 @@ Works from a fresh clone — it rebuilds `backend.hcl` if missing — but it sti
 
 ## Cost
 
-Idle baseline ≈ **$0.16/hour** (~$118/month), whether or not anyone uses it:
+Idle baseline ≈ **$0.163/hour** (~$119/month), whether or not anyone uses it:
 
-| Component | Approx. hourly |
-|---|---|
-| 2 × NAT Gateway | $0.104 |
-| ALB | $0.027 |
-| Public IPv4 (2 × ALB, 2 × NAT EIP) | $0.020 |
-| WAF (web ACL + 2 rules) | $0.010 |
+| Component | Per hour | Per month |
+|---|---|---|
+| 2 × NAT Gateway | $0.104 | $75.92 |
+| ALB | $0.027 | $19.71 |
+| Public IPv4 × 4 (2 × ALB, 2 × NAT EIP) | $0.020 | $14.60 |
+| WAF (web ACL + managed group + rate rule) | ~$0.0096 | $7.00 |
+| ECR storage, 18 GB | ~$0.0025 | $1.80 |
+| **Idle subtotal** | **~$0.163** | **$119.03** |
 
-Plus ~$1.80/month for ECR storage of the 18 GB image. The GPU (~$0.98/hour) runs only while serving. Tearing the stack down between sessions is the single biggest saving.
+USD list prices for eu-central-1 (Frankfurt), checked 20 September 2026, at 730 hours/month; Linux shared-tenancy On-Demand. The GPU (**$1.0064/hour** for `g6.xlarge`) runs only while serving and is excluded above, as are EBS, data transfer, CloudFront, S3, CloudWatch and taxes — a 100 GB gp3 root volume adds $9.52 for a full month. Tearing the stack down between sessions is the single biggest saving.
 
 ## Troubleshooting
 
@@ -150,7 +152,7 @@ Plus ~$1.80/month for ECR storage of the 18 GB image. The GPU (~$0.98/hour) runs
 - **Scale-out is effectively inert.** The target-tracking policy aims at 600 requests per target per minute — ~300× the peak observed in testing. Streaming inference saturates far below that, and the latency alarm is no backstop: `TargetResponseTime` measures only time to the first response header (87 ms for replies taking many seconds). A useful signal would be in-flight concurrency or vLLM queue depth. An honest threshold needs load testing this project has not done.
 - **Waking from zero launches two instances.** ECS managed scaling always scales out to two initially when no container instances are running. Only one receives the task; the spare carries no task and was terminated after 18 minutes in the final run.
 - **Scale-in is all-or-nothing** — capacity returns only to zero, after 15 consecutive minutes without ALB requests. No graduated 3 → 2 → 1.
-- **Cold start** is inherent to GPU scale-to-zero, the trade for not paying ~$0.98/hour to idle.
+- **Cold start** is inherent to GPU scale-to-zero, the trade for not paying $1.0064/hour to idle.
 - **Single-turn chat.** The UI sends the system prompt plus the current message; no history.
 - **Five WAF body rules are counted, not blocked.** The Core Rule Set rejects ordinary chat prose — a pasted article over 8 KB, `<script>`, `../`, an IPv4 host. Overridden to `Count`, so they still report. Every other rule and the rate limit still block.
 - **AZs are chosen by index.** The subnets take the first two AZs the region reports, without checking `g6` is offered there. If not, `terraform apply` succeeds and the task stays pending.
