@@ -1,44 +1,45 @@
 # Scalable LLM Inference Service on AWS
 
-Self-hosted **Google Gemma 4 (E2B-it)** served with **vLLM** on ECS-on-EC2, behind a CloudFront + ALB edge, with **scale-to-zero** GPU and token streaming to a vanilla HTML/JS chat UI. Defined entirely in **Terraform**.
+Self-hosted **Google Gemma 4 (E2B-it)** served with **vLLM** on an AWS GPU, with a simple chat UI. The GPU scales to zero when idle. Everything is defined in **Terraform**.
 
-A personal project exploring end-to-end LLM deployment on AWS — the model runs on my own GPU, not a third-party API.
+A personal project exploring end-to-end LLM deployment on AWS. The model runs on my own GPU, not a third-party API.
 
 ## Architecture
 
 ![Architecture](docs/architecture.png)
 
-**Request flow:** browser → CloudFront (static UI from a private S3 bucket via OAC; `/v1/*` → ALB) → WAF → ALB → ECS task. A **FastAPI proxy** validates the `x-api-key`, then forwards to **vLLM** on localhost with an internal Bearer token; vLLM streams tokens back as Server-Sent Events.
+**How a request flows:** browser → CloudFront → WAF → ALB → ECS task on a GPU instance. CloudFront serves the chat UI from a private S3 bucket and forwards `/v1/*` API calls to the ALB. Inside the task, a small FastAPI proxy checks the API key and passes the request to vLLM, which streams the reply back token by token.
 
 | Layer | Choice |
 |---|---|
-| IaC | Terraform ≥ 1.10, AWS provider `~> 6.45` (S3 backend, native locking) |
-| Compute | ECS-on-EC2 · `g6.xlarge` (NVIDIA L4, BF16) |
-| Serving | vLLM v0.20.2 (OpenAI-compatible API) · Gemma 4 E2B-it |
-| Proxy | FastAPI sidecar — `x-api-key` auth + SSE pass-through |
-| Edge | CloudFront (OAC) + WAFv2 · ALB across 2 AZs |
-| Secrets | SSM Parameter Store (SecureString, KMS) |
-| Observability | CloudWatch dashboard + alarms · SNS email |
-| CI | GitHub Actions — format, validate, unit tests (no AWS access) |
+| Infrastructure | Terraform ≥ 1.10, AWS provider `~> 6.45` |
+| Compute | ECS on EC2, `g6.xlarge` (NVIDIA L4) |
+| Model server | vLLM v0.20.2 running Gemma 4 E2B-it |
+| Proxy | FastAPI: API key check + streaming |
+| Edge | CloudFront + WAF + ALB across 2 AZs |
+| Secrets | SSM Parameter Store (encrypted) |
+| Monitoring | CloudWatch dashboard and alarms, SNS email |
+| CI | GitHub Actions: format, validate, tests |
 
-**Multi-AZ** VPC, NAT per AZ, ALB and ASG across both — see [Limitations](#limitations) for the availability caveat. **Scale-to-zero**: no GPU when idle, wakes on the first request, back to zero after 15 idle minutes. **Secure**: private subnets, ALB reachable only from CloudFront's origin ranges, WAF rate limiting, dual-key auth, SSM SecureString, Hugging Face token via BuildKit secret, S3 reachable only through CloudFront OAC.
+- **Scale to zero:** no GPU runs when idle. The first request wakes it up, and it shuts down again after 15 idle minutes.
+- **Secure by default:** private subnets, ALB reachable only from CloudFront, WAF rate limiting, API keys stored encrypted in SSM.
 
 ## Prerequisites
 
-The automation is four Bash scripts. It runs natively on **Linux** and **macOS** — no GNU-only flags or Bash 4 syntax, so macOS's stock `/bin/bash` is fine, and your interactive shell can be zsh. On **Windows** it needs **WSL2**; run everything inside the Linux filesystem.
+Works on **Linux** and **macOS**. On **Windows**, use **WSL2**.
 
-| Tool | Tested | Minimum | Needed for |
-|---|---|---|---|
-| Terraform | 1.15.6 | 1.10.0 | everything (`use_lockfile` needs ≥ 1.10) |
-| AWS CLI | 2.34.0 | 2.x | deploy, state bucket, cache invalidation |
-| Docker | 29.5.3 | 23.0 | image build (needs BuildKit/Buildx) |
-| Python | 3.14 (image) / 3.11 (tests) | 3.11 | proxy + tests |
-| Node.js | 24 | 22 | frontend tests only |
-| OpenSSL | 3.x | any | generating API keys on first deploy |
+You need:
 
-**AWS** — credentials with permission to create VPC, ECS, EC2, ALB, CloudFront, S3, ECR, IAM, SSM, WAF and CloudWatch resources. GPU quota **Running On-Demand G and VT instances ≥ 4 vCPU** is not granted by default; request it in Service Quotas first, approval can take a day.
+- Terraform ≥ 1.10
+- AWS CLI v2
+- Docker ≥ 23 (with Buildx)
+- Python ≥ 3.11
+- Node.js ≥ 22 (frontend tests only)
+- OpenSSL
 
-**Hugging Face** — accept Google's licence on the `google/gemma-4-E2B-it` model page, then create a read token.
+**AWS:** an account that can create the resources above. You also need GPU quota: in Service Quotas, request **Running On-Demand G and VT instances ≥ 4 vCPU**. It isn't granted by default, and approval can take a day.
+
+**Hugging Face:** accept Google's licence on the `google/gemma-4-E2B-it` model page, then create a read token.
 
 ## Deploy
 
@@ -50,40 +51,44 @@ export HF_TOKEN=hf_...
 ./scripts/deploy.sh
 ```
 
-No configuration step. `deploy.sh` generates `terraform/terraform.tfvars` on the first run — two API keys from `openssl rand -base64 24`, defaults for the rest, mode `600`. It writes the file **only when absent**, because the keys live in SSM and rewriting them would redeploy the service for nothing. Deleting it makes the next deploy generate fresh keys.
+No configuration needed. On the first run, the script creates `terraform/terraform.tfvars` with two random API keys and default settings. It never overwrites that file. Delete it if you want new keys.
 
-To pin values yourself, `cp terraform/terraform.tfvars.example terraform/terraform.tfvars` and edit it before deploying. Or override these while generating:
+To change the defaults, set any of these when you run the script for the first time:
 
-| Variable | Default | |
+| Variable | Default | Purpose |
 |---|---|---|
-| `ALERT_EMAIL` | *(empty)* | CloudWatch alarm emails. Empty creates no subscription; alarms and the SNS topic exist either way. |
-| `AWS_REGION` | `eu-central-1` | Region to deploy into. |
-| `PROJECT_NAME` | `gemma-inference` | Prefix for every resource name and the state bucket. |
-| `INSTANCE_TYPE` | `g6.xlarge` | GPU instance type. Gemma 4 attention needs L4-class, not T4. |
+| `AWS_REGION` | `eu-central-1` | Region to deploy into |
+| `PROJECT_NAME` | `gemma-inference` | Prefix for all resource names |
+| `INSTANCE_TYPE` | `g6.xlarge` | GPU instance (must be L4-class; T4 won't work) |
+| `ALERT_EMAIL` | *(empty)* | Where alarm emails are sent |
 
-The script prompts twice; `AUTO_APPROVE=1` answers both (same for `destroy.sh`). What it does:
+You can also copy `terraform/terraform.tfvars.example` to `terraform/terraform.tfvars` and edit it before deploying.
 
-1. **Preflight** — tools, credentials, Docker daemon, `buildx`, `HF_TOKEN`; generates `terraform.tfvars`; warns if the GPU vCPU quota is below 4.
-2. **State backend** — creates `<project_name>-tfstate-<account-id>` (versioned, encrypted, private), writes `backend.hcl`, runs `terraform init`. The account ID keeps the name collision-free, which is why nothing is hardcoded. Re-runs reuse it.
-3. **ECR first** — applied alone with `-target=module.ecr`, so images have somewhere to go.
-4. **Build and push** — repository URL read back from Terraform, so the build cannot target the wrong repo. The image bakes in the weights, so this step is dominated by uploading 18 GB: **20-31 min** measured, depending on upload bandwidth.
-5. **Apply the rest** — plan, confirm, apply.
+The script asks for confirmation twice. Set `AUTO_APPROVE=1` to skip both prompts.
 
-To run Terraform by hand afterwards: `terraform init -backend-config=backend.hcl`.
+What the script does:
+
+1. Checks your tools, AWS credentials, Docker and GPU quota.
+2. Creates an S3 bucket for Terraform state.
+3. Creates the ECR image repository.
+4. Builds and pushes the Docker image. It includes the 18 GB of model weights, so this takes **20–31 minutes** depending on your upload speed.
+5. Deploys everything else.
+
+To run Terraform by hand later: `terraform init -backend-config=backend.hcl`.
 
 ## Use
 
 ```bash
 cd terraform
 terraform output frontend_url
-terraform output -raw public_api_key    # -raw required; value is sensitive
+terraform output -raw public_api_key
 ```
 
-Open the URL, paste the key, chat.
+Open the URL, paste the key and start chatting.
 
-The first request after idle triggers a cold start — **17 min 14 s** on a brand-new deploy in the final measured run, of which 13 min 25 s was pulling the 18 GB image; ~5 min when warm. The UI shows progress and resends automatically. After that, sub-second to first token.
+The first request after an idle period has to start the GPU. On a brand-new deploy this took about **17 minutes**, mostly pulling the 18 GB image. When warm, it takes about 5 minutes. The UI shows progress and retries on its own. Once the GPU is running, replies start in under a second.
 
-## Checks
+## Run the tests
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -91,72 +96,47 @@ pip install -r tests/requirements.txt
 ./scripts/check.sh
 ```
 
-`python3 -m venv` is silent for up to half a minute while installing pip — let it finish. The virtualenv is not optional on Debian, Ubuntu 23.04+, Fedora and Amazon Linux, whose system Python refuses a bare `pip install`.
+No AWS account, deployment or Docker needed. The 28 tests cover Terraform formatting and validation, the API key proxy, how the UI handles streamed replies, and whether the config files and scripts stay consistent. GitHub Actions runs the same checks on every push and pull request.
 
-No AWS credentials, deployment or Docker needed (a fresh `terraform init` does fetch providers). 28 tests:
-
-- `terraform fmt -check`, `terraform validate` (`-backend=false`), shell and Python syntax
-- **proxy** — missing, wrong or unconfigured `x-api-key` rejected with 401; a valid one swapped for the internal Bearer token; streamed response passes through byte-for-byte
-- **frontend** — an SSE event split across network chunks is reassembled, checked at every possible split point
-- **config contracts** — what a clean clone depends on: the example tfvars declares every variable without a default and its placeholders are the ones validation refuses; `app.js` and the module rendering it agree on template variables and pass them through `jsonencode`; `deploy.sh`'s tfvars parser reads the example; both scripts support `AUTO_APPROVE`. The generation branch is then run for real and its output checked — mode `600`, valid `fmt`-clean HCL, two distinct accepted keys, the four overrides, and that a second run leaves an existing file untouched.
-
-GitHub Actions runs the same script on every push and pull request, with no AWS access and no secrets.
-
-## Teardown
+## Tear down
 
 ```bash
-./scripts/destroy.sh                    # AUTO_APPROVE=1 to skip the prompt
-PURGE_STATE=1 ./scripts/destroy.sh      # also delete the state bucket
+./scripts/destroy.sh                   # add AUTO_APPROVE=1 to skip the prompt
+PURGE_STATE=1 ./scripts/destroy.sh     # also delete the Terraform state bucket
 ```
 
-Works from a fresh clone — it rebuilds `backend.hcl` if missing — but it still needs `terraform/terraform.tfvars`, since Terraform wants values for variables without defaults even to plan a destroy.
+`terraform/terraform.tfvars` must still exist. Teardown takes about 50 minutes, mostly waiting for the ECS service to drain. If Terraform times out, the script retries once automatically. At the end it checks for leftover resources, but treat that as a quick check, not a guarantee.
 
-**Destroy, retried once.** If `terraform destroy` times out — typically while the ECS service drains — it waits 60 seconds and tries exactly once more. Not hypothetical: in the measured teardown the service sat in `DRAINING` for ~26 min with every task already stopped, past Terraform's 20-minute delete timeout, and the retry finished it. The service now declares a 40-minute timeout, and the final teardown completed in one pass without a retry: 51 min end to end, of which ~41 min was draining. That margin is thin, which is why the retry stays. A second failure exits non-zero and leaves the state bucket alone.
-
-**Leftover check.** Queries the Resource Groups Tagging API for anything tagged `Name=<project_name>-*` in the region. A smoke test, not a guarantee: untagged resources are invisible to it, global ones like CloudFront may not appear, and ECS task definition revisions are counted separately because ECS only ever marks them `INACTIVE`. Without `tag:GetResources` the result is reported as unknown.
-
-**State bucket.** Kept by default; `deploy.sh` creates it outside the stack, so `terraform destroy` never sees it. `PURGE_STATE=1` deletes every object version first (the bucket is versioned, so `aws s3 rb --force` alone fails), then the bucket. Re-running after a purge is fine — it skips the destroy and still runs the leftover check.
+The state bucket is kept unless you set `PURGE_STATE=1`.
 
 ## Cost
 
-Idle baseline ≈ **$0.163/hour** (~$119/month), whether or not anyone uses it:
+When idle, the stack costs about **$0.16/hour (~$119/month)**. Most of that is the two NAT Gateways (~$76), the ALB (~$20) and public IP addresses (~$15). The GPU (~$1.01/hour for `g6.xlarge`) only runs while it's serving requests.
 
-| Component | Per hour | Per month |
-|---|---|---|
-| 2 × NAT Gateway | $0.104 | $75.92 |
-| ALB | $0.027 | $19.71 |
-| Public IPv4 × 4 (2 × ALB, 2 × NAT EIP) | $0.020 | $14.60 |
-| WAF (web ACL + managed group + rate rule) | ~$0.0096 | $7.00 |
-| ECR storage, 18 GB | ~$0.0025 | $1.80 |
-| **Idle subtotal** | **~$0.163** | **$119.03** |
-
-USD list prices for eu-central-1 (Frankfurt), checked 20 September 2026, at 730 hours/month; Linux shared-tenancy On-Demand. The GPU (**$1.0064/hour** for `g6.xlarge`) runs only while serving and is excluded above, as are EBS, data transfer, CloudFront, S3, CloudWatch and taxes — a 100 GB gp3 root volume adds $9.52 for a full month. Tearing the stack down between sessions is the single biggest saving.
+These are eu-central-1 prices as of 20 September 2026. They leave out storage, data transfer, CloudFront, S3, CloudWatch and taxes. **Tearing the stack down when you're not using it saves the most.**
 
 ## Troubleshooting
 
-| Symptom | Cause and fix |
+| Problem | Fix |
 |---|---|
-| `VcpuLimitExceeded` / instance never launches | GPU quota not granted. Request **Running On-Demand G and VT instances** ≥ 4 vCPU. |
-| Image build fails downloading the model | `HF_TOKEN` not exported, or Google's licence not accepted. |
-| `denied: authorization token has expired` | ECR login lasts 12 h. Re-run `./scripts/deploy.sh`. |
-| No alarm emails | `alert_email` empty, or the SNS subscription not confirmed. Alarms still fire — check CloudWatch. |
-| UI stuck on "Still warming up" | Normal during a cold start; it retries ~22 min. Beyond that check ECS service events and `/ecs/<project>/vllm`. |
-| `terraform init` asks for a bucket | Run it with `-backend-config=backend.hcl`, or just use `./scripts/deploy.sh`. |
+| `VcpuLimitExceeded` or the instance never launches | GPU quota not granted yet. See [Prerequisites](#prerequisites). |
+| Image build fails downloading the model | Export `HF_TOKEN` and accept Google's licence. |
+| `denied: authorization token has expired` | The ECR login lasts 12 hours. Re-run `./scripts/deploy.sh`. |
+| No alarm emails | Set `alert_email` and confirm the SNS subscription email. Alarms still show in CloudWatch. |
+| UI stuck on "Still warming up" | Normal during a cold start (it retries for ~22 minutes). If it takes longer, check the ECS service events and the `/ecs/<project>/vllm` logs. |
+| `terraform init` asks for a bucket | Add `-backend-config=backend.hcl`, or just use `./scripts/deploy.sh`. |
 
 ## Limitations
 
-- **Availability is partial.** Infrastructure spans two AZs; inference does not. One GPU task, scaled to zero, so the service is unavailable during a cold start. Continuous availability means `min_capacity = 1` and an always-on GPU.
-- **TLS terminates at the edge.** CloudFront → ALB is plain HTTP. End-to-end TLS needs a custom domain and ACM certificate.
-- **Origin verification is incomplete.** The ALB was originally open to the internet, and during testing an unauthenticated `GET /` from an external scanner reached it within two minutes of it going live, was answered 503 because the service was at zero, and launched two GPU instances. The security group now admits only CloudFront's published origin-facing ranges, verified by a direct request timing out while the CloudFront route returned 200. It still cannot distinguish this distribution from another CloudFront customer's — that needs a secret origin header checked by WAF, and is future work.
-- **Rate limiting is best-effort.** WAF aggregates on the first `X-Forwarded-For` address, which a caller can influence.
-- **Scale-out is effectively inert.** The target-tracking policy aims at 600 requests per target per minute — ~300× the peak observed in testing. Streaming inference saturates far below that, and the latency alarm is no backstop: `TargetResponseTime` measures only time to the first response header (87 ms for replies taking many seconds). A useful signal would be in-flight concurrency or vLLM queue depth. An honest threshold needs load testing this project has not done.
-- **Waking from zero launches two instances.** ECS managed scaling always scales out to two initially when no container instances are running. Only one receives the task; the spare carries no task and was terminated after 18 minutes in the final run.
-- **Scale-in is all-or-nothing** — capacity returns only to zero, after 15 consecutive minutes without ALB requests. No graduated 3 → 2 → 1.
-- **Cold start** is inherent to GPU scale-to-zero, the trade for not paying $1.0064/hour to idle.
-- **Single-turn chat.** The UI sends the system prompt plus the current message; no history.
-- **Five WAF body rules are counted, not blocked.** The Core Rule Set rejects ordinary chat prose — a pasted article over 8 KB, `<script>`, `../`, an IPv4 host. Overridden to `Count`, so they still report. Every other rule and the rate limit still block.
-- **AZs are chosen by index.** The subnets take the first two AZs the region reports, without checking `g6` is offered there. If not, `terraform apply` succeeds and the task stays pending.
+- **Not highly available.** There's one GPU task and it scales to zero, so the service is unavailable during a cold start.
+- **No end-to-end TLS.** Traffic from CloudFront to the ALB is plain HTTP. Fixing this needs a custom domain and certificate.
+- **The ALB lock-down is partial.** It only accepts traffic from CloudFront, but it can't tell this CloudFront distribution apart from someone else's.
+- **Rate limiting is best-effort.** It goes by the `X-Forwarded-For` address, which callers can fake.
+- **Autoscaling is basic.** Scaling out effectively never triggers, because the threshold hasn't been load-tested. Waking from zero briefly starts two instances but uses only one. Scaling in goes straight back to zero after 15 idle minutes.
+- **Single-turn chat.** The UI doesn't keep conversation history.
+- **Five WAF rules only log.** They're set to count instead of block, because they flagged normal chat text.
+- **AZs aren't checked for GPU support.** If `g6` isn't offered in the chosen zones, the task stays pending.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
